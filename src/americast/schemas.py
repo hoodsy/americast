@@ -16,3 +16,22 @@ CAISO_SOLAR_5MIN = pa.schema(
         pa.field("solar_mw", pa.float64(), nullable=False),
     ]
 )
+
+# California utility-scale solar PV plant registry from EIA-860
+# (operating plants, plant-level aggregation of the generator schedule).
+# tracking is "single_axis" | "dual_axis" | "fixed" | "unknown" — the
+# capacity-dominant type when a plant mixes them. county and
+# balancing_authority (EIA code, e.g. CISO/LDWP/BANC/IID) support
+# sub-state grouping; unknowns are filled with "UNKNOWN", never null.
+PLANTS_CA = pa.schema(
+    [
+        pa.field("plant_id", pa.int64(), nullable=False),
+        pa.field("plant_name", pa.string(), nullable=False),
+        pa.field("latitude", pa.float64(), nullable=False),
+        pa.field("longitude", pa.float64(), nullable=False),
+        pa.field("capacity_mw_ac", pa.float64(), nullable=False),
+        pa.field("tracking", pa.string(), nullable=False),
+        pa.field("county", pa.string(), nullable=False),
+        pa.field("balancing_authority", pa.string(), nullable=False),
+    ]
+)
