@@ -33,3 +33,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # pandas 2.3.3 internals vs numpy 2.5; fixed in pandas 3 (blocked by gridstatus)
+    "ignore:The 'generic' unit for NumPy timedelta:DeprecationWarning",
+]
