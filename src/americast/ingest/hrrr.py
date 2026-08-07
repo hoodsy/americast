@@ -28,7 +28,7 @@ SEARCH = (
 GRIB_TMP = Path("data/tmp/herbie")
 
 
-def fetch_fields(run_time: pd.Timestamp, fhour: int) -> list[xr.Dataset]:
+def fetch(run_time: pd.Timestamp, fhour: int) -> list[xr.Dataset]:
     """Download the five fields for one (run, forecast hour) as xarray.
 
     run_time must be tz-aware UTC. cfgrib groups variables by level
@@ -47,14 +47,14 @@ def fetch_fields(run_time: pd.Timestamp, fhour: int) -> list[xr.Dataset]:
     return [dss] if isinstance(dss, xr.Dataset) else dss
 
 
-def extract_at_plants(dss: list[xr.Dataset], plants: pd.DataFrame) -> pd.DataFrame:
+def extract(dss: list[xr.Dataset], plants: pd.DataFrame) -> pd.DataFrame:
     """Sample each gridded field at the plant coordinates.
 
     Nearest-gridpoint on HRRR's 3 km Lambert grid via Herbie's
     pick_points (the grid is projected, so lat/lon lookup is a
     nearest-neighbor search, not an index). Returns one row per plant
     with cfgrib's variable names — renaming and wind math are
-    build_run_frame's job.
+    finalize's job.
     """
     pts = plants[["plant_id", "latitude", "longitude"]].reset_index(drop=True)
     out = pts[["plant_id"]].copy()
@@ -75,7 +75,7 @@ def extract_at_plants(dss: list[xr.Dataset], plants: pd.DataFrame) -> pd.DataFra
     return out
 
 
-def finalize_fhour(
+def finalize(
     raw: pd.DataFrame, run_time: pd.Timestamp, fhour: int
 ) -> pd.DataFrame:
     """Pure reshaping of one extracted forecast hour into schema form.
@@ -99,17 +99,14 @@ def finalize_fhour(
     )
 
 
-def build_run_frame(run_time: pd.Timestamp, plants: pd.DataFrame) -> pd.DataFrame:
+def build(run_time: pd.Timestamp, plants: pd.DataFrame) -> pd.DataFrame:
     """One run's full table: forecast hours f01-f48 × all plants.
 
     Network-bound — 48 sequential byte-range fetches, ~10 minutes.
     """
-    frames = [
-        finalize_fhour(
-            extract_at_plants(fetch_fields(run_time, fhour), plants),
-            run_time,
-            fhour,
-        )
-        for fhour in range(1, 49)
-    ]
+    frames = []
+    for fhour in range(1, 49):
+        grids = fetch(run_time, fhour)
+        at_plants = extract(grids, plants)
+        frames.append(finalize(at_plants, run_time, fhour))
     return pd.concat(frames, ignore_index=True)

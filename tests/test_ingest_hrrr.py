@@ -5,7 +5,7 @@ import pytest
 import xarray as xr
 
 from americast.ingest import hrrr
-from americast.ingest.hrrr import build_run_frame, extract_at_plants, finalize_fhour
+from americast.ingest.hrrr import build, extract, finalize
 from americast.schemas import HRRR_WEATHER
 
 
@@ -39,7 +39,7 @@ def test_extracts_exact_cell_values() -> None:
     values = np.arange(25, dtype="float64").reshape(5, 5)
     ds = synthetic_grid(values, "sdswrf")
     plants = plants_at_cells([(0, 0), (2, 3), (4, 4)])
-    out = extract_at_plants([ds], plants)
+    out = extract([ds], plants)
     assert list(out["plant_id"]) == [100, 101, 102]
     assert list(out["sdswrf"]) == [0.0, 13.0, 24.0]
 
@@ -48,7 +48,7 @@ def test_merges_variables_across_datasets() -> None:
     ds_a = synthetic_grid(np.full((5, 5), 7.0), "t2m")
     ds_b = synthetic_grid(np.full((5, 5), 3.0), "tcc")
     plants = plants_at_cells([(1, 1), (3, 2)])
-    out = extract_at_plants([ds_a, ds_b], plants)
+    out = extract([ds_a, ds_b], plants)
     assert set(out.columns) == {"plant_id", "t2m", "tcc"}
     assert (out["t2m"] == 7.0).all()
     assert (out["tcc"] == 3.0).all()
@@ -66,7 +66,7 @@ def test_far_off_grid_plant_fails_loudly() -> None:
         ValueError,
         match="max_distance|km from nearest gridpoint|points for",
     ):
-        extract_at_plants([ds], plants)
+        extract([ds], plants)
 
 
 RUN = pd.Timestamp("2024-06-01 06:00", tz="UTC")
@@ -85,8 +85,8 @@ def raw_extract(n: int = 3) -> pd.DataFrame:
     )
 
 
-def test_finalize_fhour_shapes_and_maths() -> None:
-    out = finalize_fhour(raw_extract(), RUN, 12)
+def test_finalize_shapes_and_maths() -> None:
+    out = finalize(raw_extract(), RUN, 12)
     assert list(out.columns) == [f.name for f in HRRR_WEATHER]
     assert (out["w10m"] == 5.0).all(), "3-4-5 wind triangle"
     assert (out["dswrf"] == 800.0).all()
@@ -95,13 +95,13 @@ def test_finalize_fhour_shapes_and_maths() -> None:
     assert str(out["lead_hours"].dtype) == "int32"
 
 
-def test_finalize_fhour_conforms_to_schema() -> None:
-    out = finalize_fhour(raw_extract(), RUN, 1)
+def test_finalize_conforms_to_schema() -> None:
+    out = finalize(raw_extract(), RUN, 1)
     table = pa.Table.from_pandas(out, schema=HRRR_WEATHER, preserve_index=False)
     assert table.num_rows == 3
 
 
-def test_build_run_frame_loops_all_48(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_loops_all_48(monkeypatch: pytest.MonkeyPatch) -> None:
     fetched: list[int] = []
 
     def fake_fetch(run_time: pd.Timestamp, fhour: int) -> list[str]:
@@ -112,11 +112,11 @@ def test_build_run_frame_loops_all_48(monkeypatch: pytest.MonkeyPatch) -> None:
         assert dss == ["sentinel"]
         return raw_extract(len(plants))
 
-    monkeypatch.setattr(hrrr, "fetch_fields", fake_fetch)
-    monkeypatch.setattr(hrrr, "extract_at_plants", fake_extract)
+    monkeypatch.setattr(hrrr, "fetch", fake_fetch)
+    monkeypatch.setattr(hrrr, "extract", fake_extract)
 
     plants = pd.DataFrame({"plant_id": [1, 2]})
-    out = build_run_frame(RUN, plants)
+    out = build(RUN, plants)
     assert fetched == list(range(1, 49))
     assert len(out) == 48 * 2
     assert sorted(out["lead_hours"].unique()) == list(range(1, 49))
