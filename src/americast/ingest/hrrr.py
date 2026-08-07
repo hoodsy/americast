@@ -9,6 +9,7 @@ discard the grid. Grids are never stored.
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 from herbie import Herbie
@@ -72,3 +73,43 @@ def extract_at_plants(dss: list[xr.Dataset], plants: pd.DataFrame) -> pd.DataFra
         for var in ds.data_vars:
             out[var] = frame[var].to_numpy()
     return out
+
+
+def finalize_fhour(
+    raw: pd.DataFrame, run_time: pd.Timestamp, fhour: int
+) -> pd.DataFrame:
+    """Pure reshaping of one extracted forecast hour into schema form.
+
+    cfgrib names → schema names, wind components → scalar speed, and the
+    three time facts stamped on every row. lead_hours >= 1 by
+    construction — the "no row where valid_time <= run_time" invariant
+    is born here, not enforced later.
+    """
+    return pd.DataFrame(
+        {
+            "run_time": run_time,
+            "valid_time": run_time + pd.Timedelta(hours=fhour),
+            "lead_hours": np.int32(fhour),
+            "plant_id": raw["plant_id"],
+            "dswrf": raw["sdswrf"],
+            "tcdc": raw["tcc"],
+            "t2m": raw["t2m"],
+            "w10m": np.sqrt(raw["u10"] ** 2 + raw["v10"] ** 2),
+        }
+    )
+
+
+def build_run_frame(run_time: pd.Timestamp, plants: pd.DataFrame) -> pd.DataFrame:
+    """One run's full table: forecast hours f01-f48 × all plants.
+
+    Network-bound — 48 sequential byte-range fetches, ~10 minutes.
+    """
+    frames = [
+        finalize_fhour(
+            extract_at_plants(fetch_fields(run_time, fhour), plants),
+            run_time,
+            fhour,
+        )
+        for fhour in range(1, 49)
+    ]
+    return pd.concat(frames, ignore_index=True)

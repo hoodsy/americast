@@ -1,9 +1,12 @@
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 import xarray as xr
 
-from americast.ingest.hrrr import extract_at_plants
+from americast.ingest import hrrr
+from americast.ingest.hrrr import build_run_frame, extract_at_plants, finalize_fhour
+from americast.schemas import HRRR_WEATHER
 
 
 def synthetic_grid(values: np.ndarray, name: str) -> xr.Dataset:
@@ -64,3 +67,57 @@ def test_far_off_grid_plant_fails_loudly() -> None:
         match="max_distance|km from nearest gridpoint|points for",
     ):
         extract_at_plants([ds], plants)
+
+
+RUN = pd.Timestamp("2024-06-01 06:00", tz="UTC")
+
+
+def raw_extract(n: int = 3) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "plant_id": [100 + i for i in range(n)],
+            "sdswrf": [800.0] * n,
+            "tcc": [25.0] * n,
+            "t2m": [300.0] * n,
+            "u10": [3.0] * n,
+            "v10": [4.0] * n,
+        }
+    )
+
+
+def test_finalize_fhour_shapes_and_maths() -> None:
+    out = finalize_fhour(raw_extract(), RUN, 12)
+    assert list(out.columns) == [f.name for f in HRRR_WEATHER]
+    assert (out["w10m"] == 5.0).all(), "3-4-5 wind triangle"
+    assert (out["dswrf"] == 800.0).all()
+    assert (out["valid_time"] - out["run_time"] == pd.Timedelta(hours=12)).all()
+    assert (out["lead_hours"] == 12).all()
+    assert str(out["lead_hours"].dtype) == "int32"
+
+
+def test_finalize_fhour_conforms_to_schema() -> None:
+    out = finalize_fhour(raw_extract(), RUN, 1)
+    table = pa.Table.from_pandas(out, schema=HRRR_WEATHER, preserve_index=False)
+    assert table.num_rows == 3
+
+
+def test_build_run_frame_loops_all_48(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetched: list[int] = []
+
+    def fake_fetch(run_time: pd.Timestamp, fhour: int) -> list[str]:
+        fetched.append(fhour)
+        return ["sentinel"]
+
+    def fake_extract(dss: list[str], plants: pd.DataFrame) -> pd.DataFrame:
+        assert dss == ["sentinel"]
+        return raw_extract(len(plants))
+
+    monkeypatch.setattr(hrrr, "fetch_fields", fake_fetch)
+    monkeypatch.setattr(hrrr, "extract_at_plants", fake_extract)
+
+    plants = pd.DataFrame({"plant_id": [1, 2]})
+    out = build_run_frame(RUN, plants)
+    assert fetched == list(range(1, 49))
+    assert len(out) == 48 * 2
+    assert sorted(out["lead_hours"].unique()) == list(range(1, 49))
+    assert out["valid_time"].max() == RUN + pd.Timedelta(hours=48)
