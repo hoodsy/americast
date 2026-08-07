@@ -11,8 +11,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import xarray as xr
 from herbie import Herbie
+
+from americast.region import CAISO_CA
+from americast.schemas import HRRR_WEATHER
 
 # One regex alternative per GRIB message we keep (5 of ~170 in the file).
 SEARCH = (
@@ -26,6 +31,14 @@ SEARCH = (
 # Scratch space for in-flight GRIB subsets; remove_grib deletes each
 # file right after decode, so nothing accumulates here.
 GRIB_TMP = Path("data/tmp/herbie")
+
+# One parquet per run; the directory listing doubles as the backfill
+# manifest (a file exists == that run is done).
+HRRR_DIR = Path("data/hrrr")
+
+
+def run_path(run_time: pd.Timestamp, root: Path = HRRR_DIR) -> Path:
+    return root / f"hrrr_{run_time:%Y%m%d_%Hz}.parquet"
 
 
 def fetch(run_time: pd.Timestamp, fhour: int) -> list[xr.Dataset]:
@@ -110,3 +123,44 @@ def build(run_time: pd.Timestamp, plants: pd.DataFrame) -> pd.DataFrame:
         at_plants = extract(grids, plants)
         frames.append(finalize(at_plants, run_time, fhour))
     return pd.concat(frames, ignore_index=True)
+
+
+def write(df: pd.DataFrame, root: Path = HRRR_DIR) -> Path:
+    """Write one run's frame as one schema-enforced parquet.
+
+    Rewriting the same run replaces its file — idempotent by
+    construction, like the CAISO store.
+    """
+    if df["run_time"].nunique() != 1:
+        raise ValueError("one file per run: frame must hold a single run_time")
+    path = run_path(df["run_time"].iloc[0], root)
+    root.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pandas(df, schema=HRRR_WEATHER, preserve_index=False)
+    pq.write_table(table, path)
+    return path
+
+
+def pilot(root: Path = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
+    """Gate 3a pilot: June 2024, 06z runs only, resumable.
+
+    A run is skipped when its file already exists, so interrupting and
+    re-running continues where it stopped. Returns runs fetched this
+    call.
+    """
+    if plants is None:
+        plants = pd.read_parquet(CAISO_CA.plant_registry_path)
+    fetched = 0
+    for day in range(1, 31):
+        run_time = pd.Timestamp(2024, 6, day, 6, tz="UTC")
+        if run_path(run_time, root).exists():
+            continue
+        frame = build(run_time, plants)
+        path = write(frame, root)
+        fetched += 1
+        print(f"{path.name} written ({fetched} this session)", flush=True)
+    return fetched
+
+
+if __name__ == "__main__":
+    n = pilot()
+    print(f"pilot complete: {n} runs fetched into {HRRR_DIR}")

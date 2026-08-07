@@ -5,7 +5,7 @@ import pytest
 import xarray as xr
 
 from americast.ingest import hrrr
-from americast.ingest.hrrr import build, extract, finalize
+from americast.ingest.hrrr import build, extract, finalize, pilot, write
 from americast.schemas import HRRR_WEATHER
 
 
@@ -121,3 +121,35 @@ def test_build_loops_all_48(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(out) == 48 * 2
     assert sorted(out["lead_hours"].unique()) == list(range(1, 49))
     assert out["valid_time"].max() == RUN + pd.Timedelta(hours=48)
+
+
+def test_write_roundtrip_and_idempotence(tmp_path) -> None:
+    frame = finalize(raw_extract(), RUN, 12)
+    path = write(frame, tmp_path)
+    assert path.name == "hrrr_20240601_06z.parquet"
+    write(frame, tmp_path)  # rewrite replaces, never appends
+    stored = pd.read_parquet(path)
+    assert len(stored) == 3
+    assert list(stored["w10m"]) == [5.0, 5.0, 5.0]
+
+
+def test_write_rejects_mixed_runs(tmp_path) -> None:
+    a = finalize(raw_extract(), RUN, 1)
+    b = finalize(raw_extract(), RUN + pd.Timedelta(hours=6), 1)
+    with pytest.raises(ValueError, match="single run_time"):
+        write(pd.concat([a, b], ignore_index=True), tmp_path)
+
+
+def test_pilot_is_resumable(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build(run_time: pd.Timestamp, plants: pd.DataFrame) -> pd.DataFrame:
+        return finalize(raw_extract(), run_time, 1)
+
+    monkeypatch.setattr(hrrr, "build", fake_build)
+    plants = pd.DataFrame({"plant_id": [1]})
+
+    first = pilot(tmp_path, plants)
+    assert first == 30
+    assert len(list(tmp_path.glob("hrrr_202406*_06z.parquet"))) == 30
+
+    second = pilot(tmp_path, plants)
+    assert second == 0, "existing files are the manifest; nothing refetched"
