@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -70,6 +72,49 @@ def test_far_off_grid_plant_fails_loudly() -> None:
 
 
 RUN = pd.Timestamp("2024-06-01 06:00", tz="UTC")
+
+
+def tiny_ds(*names: str) -> xr.Dataset:
+    return xr.Dataset({n: (("y", "x"), np.zeros((2, 2))) for n in names})
+
+
+class FakeHerbie:
+    """Returns a truncated decode until asked to overwrite the local file."""
+
+    calls: ClassVar[list[bool]] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def xarray(
+        self, search: str, remove_grib: bool = True, overwrite: bool = False
+    ) -> list[xr.Dataset]:
+        FakeHerbie.calls.append(overwrite)
+        if overwrite:
+            return [tiny_ds("sdswrf"), tiny_ds("tcc"), tiny_ds("t2m", "u10", "v10")]
+        return [tiny_ds("tcc"), tiny_ds("t2m")]
+
+
+def test_fetch_retries_once_on_truncated_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeHerbie.calls = []
+    monkeypatch.setattr(hrrr, "Herbie", FakeHerbie)
+    dss = hrrr.fetch(RUN, 15)
+    assert FakeHerbie.calls == [False, True], "one plain try, one forced refresh"
+    assert hrrr._fields(dss) == hrrr.EXPECTED_VARS
+
+
+def test_fetch_fails_loudly_when_refresh_is_still_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AlwaysShort(FakeHerbie):
+        def xarray(self, *args: object, **kwargs: object) -> list[xr.Dataset]:
+            return [tiny_ds("tcc")]
+
+    monkeypatch.setattr(hrrr, "Herbie", AlwaysShort)
+    with pytest.raises(ValueError, match="missing fields.*sdswrf"):
+        hrrr.fetch(RUN, 15)
 
 
 def raw_extract(n: int = 3) -> pd.DataFrame:

@@ -41,12 +41,20 @@ def run_path(run_time: pd.Timestamp, root: Path = HRRR_DIR) -> Path:
     return root / f"hrrr_{run_time:%Y%m%d_%Hz}.parquet"
 
 
+# cfgrib's names for the five messages; fetch must deliver exactly these.
+EXPECTED_VARS = {"sdswrf", "tcc", "t2m", "u10", "v10"}
+
+
 def fetch(run_time: pd.Timestamp, fhour: int) -> list[xr.Dataset]:
     """Download the five fields for one (run, forecast hour) as xarray.
 
     run_time must be tz-aware UTC. cfgrib groups variables by level
     type, so the result is a list of Datasets (a lone Dataset is
     normalized into a one-element list).
+
+    An interrupted earlier run can leave a truncated GRIB subset in
+    GRIB_TMP, and Herbie trusts local files — so when fields come back
+    short we force exactly one fresh download, then fail loudly.
     """
     naive_utc = run_time.tz_convert("UTC").tz_localize(None)
     h = Herbie(
@@ -56,8 +64,26 @@ def fetch(run_time: pd.Timestamp, fhour: int) -> list[xr.Dataset]:
         fxx=fhour,
         save_dir=GRIB_TMP,
     )
-    dss = h.xarray(SEARCH, remove_grib=True)
+    dss = _as_list(h.xarray(SEARCH, remove_grib=True))
+    if _fields(dss) != EXPECTED_VARS:
+        dss = _as_list(h.xarray(SEARCH, remove_grib=True, overwrite=True))
+    missing = EXPECTED_VARS - _fields(dss)
+    if missing:
+        raise ValueError(
+            f"{run_time:%Y-%m-%d %Hz} f{fhour:02d} missing fields {sorted(missing)}"
+        )
+    return dss
+
+
+def _as_list(dss: xr.Dataset | list[xr.Dataset]) -> list[xr.Dataset]:
     return [dss] if isinstance(dss, xr.Dataset) else dss
+
+
+def _fields(dss: list[xr.Dataset]) -> set[str]:
+    names: set[str] = set()
+    for ds in dss:
+        names |= set(ds.data_vars)
+    return names
 
 
 def extract(dss: list[xr.Dataset], plants: pd.DataFrame) -> pd.DataFrame:
