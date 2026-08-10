@@ -7,20 +7,30 @@ how to restart it.
 
 One parquet per model run, at `data/hrrr/hrrr_<YYYYMMDD>_<HH>z.parquet`.
 Each file holds forecast hours f01-f48 for every plant in the registry —
-928 plants x 48 hours = 44,544 rows, about 530 KB.
+928 plants x 48 hours = 44,544 rows.
+
+Seven GRIB messages per forecast hour: DSWRF, VBDSF, VDDSF, TCDC,
+TMP:2m, UGRD:10m and VGRD:10m. They become the ten columns of
+`HRRR_WEATHER`.
 
 Target window: 2023-01-01 to the present, for the 00z, 06z, 12z and 18z
-runs. That is 1317 days x 4 runs = 5268 runs, about 2.8 GB in total.
+runs. That is 1317 days x 4 runs = 5268 runs.
 
-The work is split into two passes:
+The work is split into three passes:
 
 | Pass | Runs | Count | Purpose |
 |---|---|---|---|
-| 1 | 06z only | 1287 | Gives Gates 4-5 the full history quickly |
-| 2 | 00z, 12z, 18z | 3951 | Fills in lead-time diversity |
+| 1 | 06z, June 2024 | 30 | Proves the schema and measures the rate |
+| 2 | 06z, whole window | 1287 | Gives Gates 4-5 the full history quickly |
+| 3 | 00z, 12z, 18z | 3951 | Fills in lead-time diversity |
 
-Pass 1 first, because it puts 3.5 years of data in place in about a day
-instead of six. A schema mistake then costs one day, not six.
+Pass 1 is deliberately tiny. It is the pilot month Gate 4 works against,
+so a schema mistake surfaces in 25 minutes rather than after a day of
+fetching. Pass 2 next, because it puts 3.5 years in place in about a day
+instead of six.
+
+`pending()` keys off file existence, so each pass automatically skips
+what the earlier passes already stored. No bookkeeping between them.
 
 ## Why the workers outnumber the cores
 
@@ -96,17 +106,39 @@ skips runs already known to be `missing`. Runs marked `partial` or
 network rather than absent data.
 
 ```sh
-# Pass 1: 06z across the whole window.
+# Pass 1: the pilot month. Run the golden tests before going further.
+caffeinate -i uv run python -m americast.ingest.hrrr \
+    --hours 6 --start 2024-06-01 --end 2024-06-30 --workers 12
+
+# Pass 2: 06z across the whole window.
 caffeinate -i uv run python -m americast.ingest.hrrr \
     --hours 6 --start 2023-01-01 --end 2026-08-09 --workers 12
 
-# Pass 2, later.
+# Pass 3, later.
 caffeinate -i uv run python -m americast.ingest.hrrr \
     --hours 0,12,18 --start 2023-01-01 --end 2026-08-09 --workers 12
 ```
 
 Use `caffeinate -i` so the machine does not sleep. Run only one backfill
 process at a time.
+
+## After a schema change, clear the store first
+
+`pending()` treats an existing parquet as a finished run, so old-schema
+files silently block their own refetch. Move them aside before pass 1:
+
+```sh
+mv data/hrrr data/hrrr_old && mkdir -p data/hrrr
+```
+
+Keep `data/hrrr_old` until the pilot month and its golden tests pass,
+then delete it. The manifest goes with it; that costs nothing unless it
+holds `missing` rows, which are the only entries `pending()` reads.
+
+This happened on 2026-08-10, when VBDSF and VDDSF were added to capture
+the beam/diffuse split. 248 stored runs were refetched. The lesson is
+that the cheapest moment to change the schema is the earliest one — the
+cost of a field decision grows with every run already fetched.
 
 Audit what is stored:
 
