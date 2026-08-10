@@ -18,10 +18,18 @@ CAISO_SOLAR_5MIN = pa.schema(
 )
 
 # HRRR forecast fields extracted at plant locations. One row per
-# (run_time, forecast hour, plant). Native GRIB units stored — dswrf W/m²,
-# tcdc %, t2m Kelvin, w10m m/s — unit conversion happens at feature time
-# only, so a unit bug is a cheap feature-code fix, never a re-download.
+# (run_time, forecast hour, plant). Native GRIB units stored — dswrf,
+# dni and dhi W/m², tcdc %, t2m Kelvin, w10m m/s — unit conversion
+# happens at feature time only, so a unit bug is a cheap feature-code
+# fix, never a re-download.
 # lead_hours = valid_time - run_time, always 1..48 for our runs.
+#
+# The three radiation fields are instantaneous values at valid_time, not
+# means over the hour, and they are tied together by
+#     dswrf = dni * cos(zenith) + dhi
+# dni is measured normal to the beam; dswrf and dhi are on a horizontal
+# surface. Keep that identity in mind before "fixing" an apparent
+# mismatch between them.
 HRRR_WEATHER = pa.schema(
     [
         pa.field("run_time", pa.timestamp("us", tz="UTC"), nullable=False),
@@ -29,6 +37,8 @@ HRRR_WEATHER = pa.schema(
         pa.field("lead_hours", pa.int32(), nullable=False),
         pa.field("plant_id", pa.int64(), nullable=False),
         pa.field("dswrf", pa.float64(), nullable=False),
+        pa.field("dni", pa.float64(), nullable=False),
+        pa.field("dhi", pa.float64(), nullable=False),
         pa.field("tcdc", pa.float64(), nullable=False),
         pa.field("t2m", pa.float64(), nullable=False),
         pa.field("w10m", pa.float64(), nullable=False),

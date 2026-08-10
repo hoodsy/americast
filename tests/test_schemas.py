@@ -42,7 +42,10 @@ def hrrr_frame() -> pd.DataFrame:
             "valid_time": [run + pd.Timedelta(hours=1), run + pd.Timedelta(hours=2)],
             "lead_hours": pd.array([1, 2], dtype="int32"),
             "plant_id": [56789, 56789],
+            # Night, then a hour at zenith ~53 deg: 500*cos(53) + 150 = 450.5.
             "dswrf": [0.0, 450.5],
+            "dni": [0.0, 500.0],
+            "dhi": [0.0, 150.0],
             "tcdc": [100.0, 37.5],
             "t2m": [288.4, 290.1],
             "w10m": [3.2, 4.1],

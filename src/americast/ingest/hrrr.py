@@ -2,9 +2,9 @@
 
 HRRR is NOAA's 3 km hourly-updating weather model. We touch only the
 00/06/12/18z runs (the ones that extend to 48 forecast hours) and, per
-run and forecast hour, byte-range download five GRIB messages — DSWRF,
-TCDC, TMP:2m, UGRD/VGRD:10m — sample them at plant coordinates, and
-discard the grid. Grids are never stored.
+run and forecast hour, byte-range download seven GRIB messages — DSWRF,
+VBDSF, VDDSF, TCDC, TMP:2m, UGRD/VGRD:10m — sample them at plant
+coordinates, and discard the grid. Grids are never stored.
 """
 
 import os
@@ -24,9 +24,19 @@ from herbie import Herbie
 from americast.region import CAISO_CA
 from americast.schemas import HRRR_WEATHER
 
-# One regex alternative per GRIB message we keep (5 of ~170 in the file).
+# One regex alternative per GRIB message we keep (7 of ~170 in the file).
+#
+# VBDSF and VDDSF are named "Visible Beam/Diffuse Downward Solar Flux",
+# which is misleading on both counts: they are broadband, and VBDSF is
+# normal to the beam (DNI), not on a horizontal surface. Verified at 788
+# plant points over zenith 13.5-54.6 degrees — DSWRF = VBDSF*cos(zenith)
+# + VDDSF closes to within 0.04%. We take the split from the model
+# instead of estimating it, because a tracker aims at the beam and 18.2
+# of the fleet's 21.5 GW tracks.
 SEARCH = (
     ":DSWRF:surface"
+    "|:VBDSF:surface"
+    "|:VDDSF:surface"
     "|:TCDC:entire atmosphere"
     "|:TMP:2 m above ground"
     "|:UGRD:10 m above ground"
@@ -58,14 +68,14 @@ def manifest_path(root: Path = HRRR_DIR) -> Path:
     return root / "manifest.csv"
 
 
-# cfgrib's names for the five messages; fetch must deliver exactly these.
-EXPECTED_VARS = {"sdswrf", "tcc", "t2m", "u10", "v10"}
+# cfgrib's names for the seven messages; fetch must deliver exactly these.
+EXPECTED_VARS = {"sdswrf", "vbdsf", "vddsf", "tcc", "t2m", "u10", "v10"}
 
 
 def fetch(
     run_time: pd.Timestamp, fhour: int, scratch: Path = GRIB_TMP
 ) -> list[xr.Dataset]:
-    """Download the five fields for one (run, forecast hour) as xarray.
+    """Download the seven fields for one (run, forecast hour) as xarray.
 
     run_time must be tz-aware UTC. cfgrib groups variables by level
     type, so the result is a list of Datasets (a lone Dataset is
@@ -169,6 +179,8 @@ def finalize(
             "lead_hours": np.int32(fhour),
             "plant_id": raw["plant_id"],
             "dswrf": raw["sdswrf"],
+            "dni": raw["vbdsf"],
+            "dhi": raw["vddsf"],
             "tcdc": raw["tcc"],
             "t2m": raw["t2m"],
             "w10m": np.sqrt(raw["u10"] ** 2 + raw["v10"] ** 2),

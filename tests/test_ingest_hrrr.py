@@ -91,7 +91,11 @@ class FakeHerbie:
     ) -> list[xr.Dataset]:
         FakeHerbie.calls.append(overwrite)
         if overwrite:
-            return [tiny_ds("sdswrf"), tiny_ds("tcc"), tiny_ds("t2m", "u10", "v10")]
+            return [
+                tiny_ds("sdswrf", "vbdsf", "vddsf"),
+                tiny_ds("tcc"),
+                tiny_ds("t2m", "u10", "v10"),
+            ]
         return [tiny_ds("tcc"), tiny_ds("t2m")]
 
 
@@ -122,6 +126,8 @@ def raw_extract(n: int = 3) -> pd.DataFrame:
         {
             "plant_id": [100 + i for i in range(n)],
             "sdswrf": [800.0] * n,
+            "vbdsf": [900.0] * n,
+            "vddsf": [100.0] * n,
             "tcc": [25.0] * n,
             "t2m": [300.0] * n,
             "u10": [3.0] * n,
@@ -135,6 +141,8 @@ def test_finalize_shapes_and_maths() -> None:
     assert list(out.columns) == [f.name for f in HRRR_WEATHER]
     assert (out["w10m"] == 5.0).all(), "3-4-5 wind triangle"
     assert (out["dswrf"] == 800.0).all()
+    assert (out["dni"] == 900.0).all(), "VBDSF lands in dni, not dswrf"
+    assert (out["dhi"] == 100.0).all()
     assert (out["valid_time"] - out["run_time"] == pd.Timedelta(hours=12)).all()
     assert (out["lead_hours"] == 12).all()
     assert str(out["lead_hours"].dtype) == "int32"
