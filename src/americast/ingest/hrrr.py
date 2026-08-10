@@ -249,6 +249,50 @@ def write(df: pd.DataFrame, root: Path = HRRR_DIR) -> Path:
     return path
 
 
+# The Gate 3a pilot: June 2024, 06z only. Named once here because two
+# callers need the same 30 run_times — pilot() to fetch them, and
+# feature work and tests to read exactly them while the backfill keeps
+# adding other runs to the same directory.
+PILOT_RUNS = [pd.Timestamp(2024, 6, day, 6, tz="UTC") for day in range(1, 31)]
+
+
+def load(
+    root: Path = HRRR_DIR, run_times: list[pd.Timestamp] | None = None
+) -> pd.DataFrame:
+    """Runs stored in `root`, concatenated into one frame.
+
+    run_times selects a subset; the default reads every stored run.
+    Pass PILOT_RUNS to hold the pilot month steady while the backfill
+    grows the directory underneath. A requested run with no file is
+    skipped rather than fatal — the archive has real holes, and
+    `pending` is the function whose job is reporting them.
+
+    The schema check is the point. Writes go through HRRR_WEATHER, but
+    a file written before a schema change reads back with silent NaN
+    columns instead of an error. pq.read_schema touches only the
+    parquet footer, so checking every file costs no data read.
+
+    This holds its result in memory — fine for the pilot month (30
+    files, 1.3M rows). The full backfill is ~5,000 files and will need
+    reading in slices instead.
+    """
+    if run_times is None:
+        paths = sorted(root.glob("hrrr_*.parquet"))
+    else:
+        wanted = [run_path(run_time, root) for run_time in sorted(run_times)]
+        paths = [path for path in wanted if path.exists()]
+    if not paths:
+        raise FileNotFoundError(f"no run files in {root}")
+    stale = []
+    for path in paths:
+        if not pq.read_schema(path).equals(HRRR_WEATHER):
+            stale.append(path.name)
+    if stale:
+        raise ValueError(f"files do not match HRRR_WEATHER: {stale}")
+    frames = [pd.read_parquet(path) for path in paths]
+    return pd.concat(frames, ignore_index=True)
+
+
 def pilot(root: Path = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
     """Gate 3a pilot: June 2024, 06z runs only, resumable.
 
@@ -259,8 +303,7 @@ def pilot(root: Path = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
     if plants is None:
         plants = pd.read_parquet(CAISO_CA.plant_registry_path)
     fetched = 0
-    for day in range(1, 31):
-        run_time = pd.Timestamp(2024, 6, day, 6, tz="UTC")
+    for run_time in PILOT_RUNS:
         if run_path(run_time, root).exists():
             continue
         frame = build(run_time, plants)
