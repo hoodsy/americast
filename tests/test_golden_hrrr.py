@@ -140,6 +140,6 @@ def test_cloud_shifts_light_from_beam_to_diffuse(run: pd.DataFrame) -> None:
 
 
 def test_lead_hours_never_reaches_back(run: pd.DataFrame) -> None:
-    """The Gate 3 invariant: a forecast hour is always in the future."""
+    """The core invariant: a forecast hour is always in the future."""
     assert (run["valid_time"] > run["run_time"]).all()
     assert run["lead_hours"].between(1, 48).all()

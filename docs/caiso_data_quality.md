@@ -15,8 +15,8 @@ DST interval counts, large negatives, frozen values
 | 2024-09-24 | 34 | |
 
 Total: 214 genuinely missing intervals in 3.6 years → 99.98% complete.
-`to_hourly` surfaces these as `n_intervals < 12`; the Gate 4 training
-table will exclude incomplete hours rather than interpolate.
+`to_hourly` surfaces these as `n_intervals < 12`; the training table
+excludes incomplete hours rather than interpolating them.
 
 ## DST conventions (expected, not data loss)
 
@@ -38,5 +38,5 @@ table will exclude incomplete hours rather than interpolate.
 
 The store's last day trails "now" by a few hours: CAISO's history CSV for
 the current day is published with a lag. Harmless — backfill always
-refetches the most recent stored day, and the Gate 6 daily loop reads the
-live feed instead.
+refetches the most recent stored day, and the daily forecast loop reads
+the live feed instead.

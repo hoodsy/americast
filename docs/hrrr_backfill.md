@@ -1,4 +1,4 @@
-# HRRR backfill (Gate 3b)
+# HRRR backfill
 
 How the historical HRRR extraction runs, why it is built this way, and
 how to restart it.
@@ -21,13 +21,13 @@ The work is split into three passes:
 | Pass | Runs | Count | Purpose |
 |---|---|---|---|
 | 1 | 06z, June 2024 | 30 | Proves the schema and measures the rate |
-| 2 | 06z, whole window | 1287 | Gives Gates 4-5 the full history quickly |
+| 2 | 06z, whole window | 1287 | Puts the full history in place quickly |
 | 3 | 00z, 12z, 18z | 3951 | Fills in lead-time diversity |
 
-Pass 1 is deliberately tiny. It is the pilot month Gate 4 works against,
-so a schema mistake surfaces in 25 minutes rather than after a day of
-fetching. Pass 2 next, because it puts 3.5 years in place in about a day
-instead of six.
+Pass 1 is deliberately tiny. It is the trial month the feature work
+reads, so a schema mistake surfaces in 25 minutes rather than after a
+day of fetching. Pass 2 next, because it puts 3.5 years in place in
+about a day instead of six.
 
 `pending()` keys off file existence, so each pass automatically skips
 what the earlier passes already stored. No bookkeeping between them.
@@ -154,17 +154,19 @@ now. The backfill therefore samples weather at 2025-era plant locations
 for every year back to 2023, including plants that did not yet exist.
 
 For the weather itself this is harmless — weather at a coordinate does
-not depend on whether a plant stands there. It mattered at Gate 4,
-where capacity-weighted aggregation would have weighted 2023 with 2026
-capacity. That is not a small correction: only 71.2% of today's CISO
-solar capacity was running at the start of 2023.
+not depend on whether a plant stands there. It mattered for feature
+building, where capacity-weighted aggregation would have weighted 2023
+with 2026 capacity. That is not a small correction: only 71.2% of
+today's CISO solar capacity was running at the start of 2023.
 
 Fixed on 2026-08-10. The registry now carries `operating_date`, the
 month a plant's first phase started generating, so the aggregation can
-drop plants that did not exist yet. Gate 4 must actually filter on it —
-the column existing is not the same as the leak being closed.
+drop plants that did not exist yet. The aggregation must actually
+filter on it — the column existing is not the same as the leak being
+closed.
 
 Residual: the date is per plant, not per phase, so a plant built in
 stages counts at full size from its first phase. 27 plants holding
 3.74 GW are staged, but only 8 (0.04 GW) stagger by more than two
-years. Generator-level dating is the fix if Gate 5 shows it matters.
+years. Dating each generator separately is the fix if the residual
+shows up in evaluation.

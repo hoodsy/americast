@@ -14,7 +14,7 @@ class RegionConfig:
     name: str
     timezone: str  # IANA key; features/display only — storage stays UTC
     iso: str  # grid operator id as gridstatus spells it
-    plant_registry_path: Path  # written by Gate 2, read by Gate 3+
+    plant_registry_path: Path  # written by ingest/eia860, read everywhere
 
 
 CAISO_CA = RegionConfig(

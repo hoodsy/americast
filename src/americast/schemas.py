@@ -1,8 +1,8 @@
 """Table schemas: one declared pyarrow schema per stored dataset.
 
 Writers must build their tables with `pa.Table.from_pandas(df, schema=...)`
-so a wrong column, dtype, or unexpected null fails at write time, not at
-read time three gates later.
+so a wrong column, dtype, or unexpected null fails at write time, not
+months later when something downstream reads it back.
 """
 
 import pyarrow as pa

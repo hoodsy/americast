@@ -203,7 +203,8 @@ def _first_online(gens: pd.DataFrame) -> pd.DataFrame:
     arrived later therefore counts at full size from its first — 27
     plants holding 3.74 GW are built in stages, but only 8 of them
     (0.04 GW) stagger by more than two years, so the residual is small.
-    Generator-level dating is the fix if Gate 5 ever shows it matters.
+    Dating each generator separately is the fix if the residual ever
+    shows up in evaluation.
     """
     parts = pd.DataFrame(
         {

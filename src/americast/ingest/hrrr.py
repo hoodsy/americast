@@ -261,7 +261,7 @@ def write(df: pd.DataFrame, root: Path = HRRR_DIR) -> Path:
     return path
 
 
-# The Gate 3a pilot: June 2024, 06z only. Named once here because two
+# One trial month: June 2024, 06z only. Named once here because two
 # callers need the same 30 run_times — pilot() to fetch them, and
 # feature work and tests to read exactly them while the backfill keeps
 # adding other runs to the same directory.
@@ -306,7 +306,7 @@ def load(
 
 
 def pilot(root: Path = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
-    """Gate 3a pilot: June 2024, 06z runs only, resumable.
+    """Fetch the trial month: June 2024, 06z runs only, resumable.
 
     A run is skipped when its file already exists, so interrupting and
     re-running continues where it stopped. Returns runs fetched this
