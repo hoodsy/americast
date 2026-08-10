@@ -10,6 +10,7 @@ discard the grid. Grids are never stored.
 import os
 import shutil
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -87,15 +88,29 @@ def fetch(
         save_dir=scratch,
         verbose=False,
     )
-    dss = _as_list(h.xarray(SEARCH, remove_grib=True))
+    dss = _open(h)
     if _fields(dss) != EXPECTED_VARS:
-        dss = _as_list(h.xarray(SEARCH, remove_grib=True, overwrite=True))
+        dss = _open(h, overwrite=True)
     missing = EXPECTED_VARS - _fields(dss)
     if missing:
         raise ValueError(
             f"{run_time:%Y-%m-%d %Hz} f{fhour:02d} missing fields {sorted(missing)}"
         )
     return dss
+
+
+def _open(h: Herbie, overwrite: bool = False) -> list[xr.Dataset]:
+    """Decode the GRIB subset, without cfgrib's merge warning.
+
+    cfgrib merges its hypercubes using xarray's old combine defaults and
+    warns about the coming change. Our subset holds one message per
+    variable, so the overlap the warning describes cannot arise — and
+    the backfill would otherwise print 62,000 copies of it. The filter
+    covers only this call.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        return _as_list(h.xarray(SEARCH, remove_grib=True, overwrite=overwrite))
 
 
 def _as_list(dss: xr.Dataset | list[xr.Dataset]) -> list[xr.Dataset]:
