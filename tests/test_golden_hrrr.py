@@ -88,20 +88,55 @@ def test_night_is_dark(with_zenith: pd.DataFrame) -> None:
     assert (night["dhi"] == 0).all()
 
 
+# HRRR's radiation scheme leaves a little numerical noise right at the
+# terminator, where dhi can go slightly negative. Measured across the
+# whole June 2024 pilot: 2 rows in 1,336,320, at -2.3 and -0.1 W/m²,
+# both at a solar zenith near 89.4 degrees where dswrf is under
+# 2 W/m² against a daylight median of 690. Real model output, not our
+# arithmetic, and physically negligible — but the bound is pinned here
+# so that a real sign error could not hide behind it.
+NOISE_FLOOR = -5.0
+
+
 def test_irradiance_ranges_are_physical(run: pd.DataFrame) -> None:
-    """No negative light, and nothing above the solar constant."""
+    """Nothing meaningfully negative, and nothing above the solar constant."""
     for column in ["dswrf", "dni", "dhi"]:
-        assert run[column].min() >= 0.0, f"{column} went negative"
+        assert run[column].min() >= NOISE_FLOOR, f"{column} went properly negative"
         assert run[column].max() < 1361.0, f"{column} exceeds the solar constant"
     assert run["dswrf"].max() > 800.0, "no clear midday hour in a whole run"
 
 
-def test_diffuse_dominates_under_thick_cloud(run: pd.DataFrame) -> None:
-    """Overcast scatters the beam away, so what is left arrives diffuse."""
-    overcast = run[(run["tcdc"] > 95) & (run["dswrf"] > 20)]
-    assert len(overcast) > 0
-    diffuse_share = overcast["dhi"] / overcast["dswrf"]
-    assert diffuse_share.median() > 0.5
+def test_cloud_shifts_light_from_beam_to_diffuse(run: pd.DataFrame) -> None:
+    """Cloud moves light out of the beam and into the diffuse sky.
+
+    Stated as a direction rather than a threshold on purpose. tcdc is
+    cloud cover over the entire atmospheric column, which says nothing
+    about optical thickness: high thin cirrus reads as 100% cover while
+    passing almost the whole beam. Under tcdc > 95 across the pilot
+    month, rows with a diffuse share below 0.3 carry a median dni of
+    813, and rows above 0.9 carry a median dni of 0 — the same "fully
+    overcast" label over two different skies.
+
+    So an absolute floor on the overcast share is not a physical fact,
+    it is a fact about which day you read. The gap between clear and
+    overcast is the robust claim: clear-sky share sits near 0.17 on
+    every run measured, and overcast always sits well above it.
+    """
+    day = run[run["dswrf"] > 20].copy()
+    day["share"] = day["dhi"] / day["dswrf"]
+    clear = day[day["tcdc"] < 5]["share"]
+    overcast = day[day["tcdc"] > 95]["share"]
+
+    assert len(clear) > 500, "need a clear-sky sample to compare against"
+    assert clear.median() < 0.25, "clear sky is beam-dominated"
+
+    # A cloudless run is a fact about California in June, not a defect.
+    # Seven of the thirty pilot runs hold fewer than 500 overcast rows,
+    # the thinnest carrying 118. Skipping beats either failing on a
+    # clear day or drawing a median from a handful of rows.
+    if len(overcast) < 100:
+        pytest.skip(f"only {len(overcast)} overcast rows in this run")
+    assert overcast.median() > clear.median() + 0.15, "cloud raises diffuse share"
 
 
 def test_lead_hours_never_reaches_back(run: pd.DataFrame) -> None:
