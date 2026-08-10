@@ -147,15 +147,24 @@ from americast.ingest.hrrr import verify
 verify()   # run_time, fhours, plants, rows — one line per stored file
 ```
 
-## Known limitation: the registry is one snapshot
+## The registry is one snapshot, and that is now handled
 
 The registry is EIA-860 2025 Early Release, listing plants operating
 now. The backfill therefore samples weather at 2025-era plant locations
 for every year back to 2023, including plants that did not yet exist.
 
 For the weather itself this is harmless — weather at a coordinate does
-not depend on whether a plant stands there. It matters at Gate 4, where
-capacity-weighted aggregation would weight 2023 with 2026 capacity. The
-registry has no operating-date column, so date-aware weighting needs a
-re-parse of EIA-860. That is cheap and needs no new download. Flagged
-here rather than fixed, because it is a Gate 4 decision.
+not depend on whether a plant stands there. It mattered at Gate 4,
+where capacity-weighted aggregation would have weighted 2023 with 2026
+capacity. That is not a small correction: only 71.2% of today's CISO
+solar capacity was running at the start of 2023.
+
+Fixed on 2026-08-10. The registry now carries `operating_date`, the
+month a plant's first phase started generating, so the aggregation can
+drop plants that did not exist yet. Gate 4 must actually filter on it —
+the column existing is not the same as the leak being closed.
+
+Residual: the date is per plant, not per phase, so a plant built in
+stages counts at full size from its first phase. 27 plants holding
+3.74 GW are staged, but only 8 (0.04 GW) stagger by more than two
+years. Generator-level dating is the fix if Gate 5 shows it matters.
