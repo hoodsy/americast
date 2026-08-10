@@ -63,9 +63,10 @@ HRRR_WEATHER = pa.schema(
 # Never average azimuth across plants; 0 and 180 average to an
 # east-west axis that exists nowhere.
 #
-# tilt is EIA's reported value only for fixed mounts. Trackers are
-# stored flat, because EIA's tracker tilts are widely misreported as
-# rotation limits — see _array_tilt in ingest/eia860.py.
+# tilt is stored exactly as EIA reported it, blanks aside. On a fixed
+# mount it is the panel angle; on a tracker it is either the axis tilt
+# or the rotation limit, depending on which question the respondent
+# answered. features/power.py splits the two by magnitude.
 #
 # operating_date is the month the plant's first phase started
 # generating, stored so historical aggregation can drop plants that did

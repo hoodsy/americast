@@ -28,26 +28,35 @@ HORIZON_ZENITH = 89.0
 TRACKED = ("single_axis", "unknown")
 KNOWN_TRACKING = ("fixed", "single_axis", "dual_axis", "unknown")
 
-# Every tracker is modelled on a flat north-south axis, whatever the
-# registry says its azimuth is. A horizontal single-axis tracker rotates
-# to follow the sun's daily east-to-west arc, and the axis it turns
-# about must lie perpendicular to that travel — so north-south. 81.5%
-# of tracked capacity is recorded that way (0 or 180, the same line
-# written two ways). The other 15% reads 90, which would be an
-# east-west axis following the sun's slow seasonal drift instead of
-# its daily arc. Those are not exotic plants: they include Daggett 3,
+# Every tracker turns about a north-south axis, whatever azimuth the
+# registry reports. The reason is a symmetry the data itself shows.
+#
+# An axis is a line, so either heading describes it equally well, and
+# respondents who mean an axis should split between the two. For
+# north-south they do: 6,821 MW says 0 and 8,959 MW says 180, a ratio
+# of 1.31 to 1. For east-west they do not: 3,341 MW says 90 and 14 MW
+# says 270, a ratio of 247 to 1. A line cannot have a preferred
+# direction. That column is recording which way the panels face, and a
+# respondent writing one direction naturally writes the morning one.
+#
+# It agrees with the plants themselves — the 90s include Daggett 3,
 # California Valley Solar Ranch and Athos, all documented horizontal
-# single-axis installations. They are the panel sweep direction
-# reported where the axis was asked for.
+# single-axis installations, which by construction turn about a
+# north-south axis to follow the sun's daily arc.
 AXIS_AZIMUTH = 180.0
 
-# How far a tracker can rotate before it stops following the sun.
-# Recovered from the tilt column EIA cannot report consistently: among
-# single-axis generators giving a non-zero "tilt", 84% of capacity
-# reads 60, 52 or 45 degrees — rotation limits, not axis tilts. 60 is
-# the modal value at 52% of that capacity and the modern standard;
-# their capacity-weighted mean is 52.6, pulled down by a residue of
-# genuine axis tilts near 25.
+# Where a reported tilt stops being an axis angle and starts being a
+# rotation limit. EIA asks trackers for their axis tilt, and some
+# answer with how far the tracker swings instead. The two do not
+# overlap in practice: no utility-scale tracker stands its axis past
+# about 30 degrees, and no rotation limit is set below it. Splitting
+# there keeps both readings — 377 MW of genuinely tilted axes and
+# 2.7 GW of real per-plant rotation limits.
+AXIS_TILT_LIMIT = 30.0
+
+# The rotation limit for the 17.1 GW that reports none. 60 is modal
+# among those that do report one, at 59% of that capacity, and is the
+# modern standard.
 MAX_ROTATION = 60.0
 
 # Ground coverage ratio: panel area over land area. Not reported by
@@ -118,12 +127,14 @@ def orient(positioned: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     reported, and the one case where they vary meaningfully — 64% of
     fixed capacity faces due south, but a fifth of it faces southeast.
 
-    Single-axis trackers rotate about a flat north-south axis, chasing
-    the sun east to west and stopping at MAX_ROTATION. Backtracking is
-    on: packed close together, rows shade their neighbours near sunrise
-    and sunset, so a real tracker gives up some of its angle to stay
-    out of its own shadow. Turning it off would claim light that the
-    row in front is standing in.
+    Single-axis trackers chase the sun east to west about a north-south
+    axis. Their reported tilt is read by magnitude: at or below
+    AXIS_TILT_LIMIT it is how far the axis itself leans, above it is
+    how far the tracker swings before it stops. Backtracking is on:
+    packed close together, rows shade their neighbours near sunrise and
+    sunset, so a real tracker gives up some of its angle to stay out of
+    its own shadow. Turning it off would claim light that the row in
+    front is standing in.
 
     Dual-axis mounts point straight at the sun, so the panel plane is
     simply the sun's own position.
@@ -150,11 +161,13 @@ def orient(positioned: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     tilt[dual] = rows.loc[dual, "zenith"]
     azimuth[dual] = rows.loc[dual, "solar_azimuth"]
 
-    tracked = rows["tracking"].isin(TRACKED)
-    if tracked.any():
-        turned = _rotate(rows.loc[tracked, "zenith"], rows.loc[tracked, "solar_azimuth"])
-        tilt[tracked] = turned["surface_tilt"].to_numpy()
-        azimuth[tracked] = turned["surface_azimuth"].to_numpy()
+    turning = rows[rows["tracking"].isin(TRACKED)]
+    for (axis_tilt, limit), group in turning.groupby(
+        [_axis_tilt(turning["tilt"]), _rotation_limit(turning["tilt"])]
+    ):
+        turned = _rotate(group, axis_tilt, limit)
+        tilt[group.index] = turned["surface_tilt"].to_numpy()
+        azimuth[group.index] = turned["surface_azimuth"].to_numpy()
 
     dark = rows["cos_zenith"] == 0.0
     tilt[dark] = 0.0
@@ -166,19 +179,33 @@ def orient(positioned: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _rotate(zenith: pd.Series, solar_azimuth: pd.Series) -> pd.DataFrame:
-    """One tracker rotation, with the fleet's axis and limits applied.
+def _axis_tilt(tilt: pd.Series) -> pd.Series:
+    """The part of a reported tilt that can only be an axis angle."""
+    return tilt.where(tilt <= AXIS_TILT_LIMIT, 0.0)
 
-    Split out because pvlib hands back a plain dict for array input and
-    a DataFrame for Series input, and the caller should not have to
-    care which.
+
+def _rotation_limit(tilt: pd.Series) -> pd.Series:
+    """The part of a reported tilt that can only be a rotation limit."""
+    return tilt.where(tilt > AXIS_TILT_LIMIT, MAX_ROTATION)
+
+
+def _rotate(group: pd.DataFrame, axis_tilt: float, limit: float) -> pd.DataFrame:
+    """Rotate one set of trackers that share an axis tilt and limit.
+
+    pvlib takes these two as scalars, not per row, which is why the
+    caller groups first. There are only about two dozen distinct pairs
+    across the fleet, so this runs a couple of dozen times rather than
+    once per plant.
+
+    Wrapped because pvlib hands back a plain dict for array input and a
+    DataFrame for Series input, and the caller should not have to care.
     """
     turned = pvlib.tracking.singleaxis(
-        zenith.to_numpy(),
-        solar_azimuth.to_numpy(),
-        axis_tilt=0.0,
+        group["zenith"].to_numpy(),
+        group["solar_azimuth"].to_numpy(),
+        axis_tilt=axis_tilt,
         axis_azimuth=AXIS_AZIMUTH,
-        max_angle=MAX_ROTATION,
+        max_angle=limit,
         backtrack=True,
         gcr=GROUND_COVER,
     )

@@ -218,3 +218,50 @@ def test_unrecognised_tracking_fails_loudly() -> None:
     rig = mounted("bifacial_carport")
     with pytest.raises(ValueError, match="unrecognised tracking types"):
         orient(position(hours(["2024-06-21 20:00"]), rig), rig)
+
+
+def test_small_reported_tilt_leans_the_axis() -> None:
+    """Below the split, the number is what it claims to be: an axis tilt."""
+    flat = oriented("single_axis", ["2024-06-21 20:00"], tilt=0.0)
+    leaning = oriented("single_axis", ["2024-06-21 20:00"], tilt=20.0)
+    assert leaning["surface_tilt"].iloc[0] != pytest.approx(
+        flat["surface_tilt"].iloc[0]
+    ), "a tilted axis presents a different plane at noon"
+    assert leaning["surface_tilt"].iloc[0] == pytest.approx(20.0, abs=2.0)
+
+
+def test_large_reported_tilt_is_a_rotation_limit() -> None:
+    """Above the split, the number caps the swing instead of leaning the axis."""
+    day = pd.date_range("2024-06-21 12:00", periods=14, freq="1h", tz="UTC")
+    times = [str(t) for t in day]
+    tight = oriented("single_axis", times, tilt=45.0)
+    loose = oriented("single_axis", times, tilt=0.0)
+    assert tight["surface_tilt"].max() == pytest.approx(45.0, abs=1e-6)
+    assert loose["surface_tilt"].max() == pytest.approx(MAX_ROTATION, abs=1e-6)
+    assert tight["surface_tilt"].max() < loose["surface_tilt"].max()
+
+
+def test_unreported_tilt_falls_back_to_the_fleet_limit() -> None:
+    day = pd.date_range("2024-06-21 12:00", periods=14, freq="1h", tz="UTC")
+    out = oriented("single_axis", [str(t) for t in day], tilt=0.0)
+    assert out["surface_tilt"].max() == pytest.approx(MAX_ROTATION, abs=1e-6)
+
+
+def test_mixed_fleet_keeps_each_plant_on_its_own_parameters() -> None:
+    """Grouping must not leak one plant's rotation limit onto another."""
+    rig = pd.DataFrame(
+        {
+            "plant_id": [1, 2, 3],
+            "latitude": [LAT] * 3,
+            "longitude": [LON] * 3,
+            "tracking": ["single_axis"] * 3,
+            "tilt": [45.0, 0.0, 20.0],
+            "azimuth": [180.0] * 3,
+        }
+    )
+    day = pd.date_range("2024-06-21 12:00", periods=14, freq="1h", tz="UTC")
+    frame = hours([str(t) for t in day], plant_ids=(1, 2, 3))
+    out = orient(position(frame, rig), rig).set_index("plant_id")
+    assert out.loc[1, "surface_tilt"].max() == pytest.approx(45.0, abs=1e-6)
+    assert out.loc[2, "surface_tilt"].max() == pytest.approx(MAX_ROTATION, abs=1e-6)
+    assert out.loc[3, "surface_tilt"].max() > 45.0, "a leaning axis is not capped at 45"

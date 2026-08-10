@@ -108,13 +108,20 @@ def test_tilt_default_follows_tracking_type() -> None:
     assert reg.loc[6, "tilt"] == 0.0, "untracked default is a flat axis"
 
 
-def test_reported_tracker_tilt_is_discarded() -> None:
+def test_geometry_is_read_off_the_dominant_phase_not_averaged() -> None:
+    # Plant 1's single-axis phase reports tilt 0; its smaller fixed
+    # phase reports 25. A mean would invent 12.5 degrees.
+    reg = build_registry(plant_sheet(), solar_sheet()).set_index("plant_id")
+    assert reg.loc[1, "tilt"] == 0.0
+
+
+def test_reported_tracker_tilt_is_kept_raw() -> None:
     # Plant 7's generators both report 60 degrees. On a tracker that is
-    # a rotation limit, not an axis tilt, and modelling it as an axis
-    # tilt would bend the plant's whole output curve.
+    # a rotation limit rather than an axis tilt, but the registry
+    # stores what EIA said and leaves the reading to the power model.
     reg = build_registry(plant_sheet(), solar_sheet()).set_index("plant_id")
     assert reg.loc[7, "tracking"] == "single_axis"
-    assert reg.loc[7, "tilt"] == 0.0, "trackers are modelled with a flat axis"
+    assert reg.loc[7, "tilt"] == 60.0, "stored as reported, not interpreted"
 
 
 def test_operating_date_is_the_first_phase() -> None:

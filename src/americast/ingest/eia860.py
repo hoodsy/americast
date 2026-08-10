@@ -116,7 +116,7 @@ def build_registry(plant: pd.DataFrame, solar: pd.DataFrame) -> pd.DataFrame:
             "capacity_mw_ac": merged["capacity_mw_ac"].astype("float64"),
             "dc_capacity_mw": merged["dc_capacity_mw"].astype("float64"),
             "tracking": merged["tracking"],
-            "tilt": _array_tilt(merged),
+            "tilt": _reported_tilt(merged),
             "azimuth": merged["azimuth"].fillna(FALLBACK_AZIMUTH).astype("float64"),
             "county": merged["County"].fillna("UNKNOWN").astype("str"),
             "balancing_authority": merged["Balancing Authority Code"]
@@ -220,31 +220,32 @@ def _first_online(gens: pd.DataFrame) -> pd.DataFrame:
     return frame.groupby("Plant Code", as_index=False)["operating_date"].min()
 
 
-def _array_tilt(merged: pd.DataFrame) -> pd.Series:
-    """The tilt to model with: reported for fixed mounts, flat for trackers.
+def _reported_tilt(merged: pd.DataFrame) -> pd.Series:
+    """Tilt exactly as EIA reported it, with only the blanks filled.
 
-    EIA form question 30b asks for "the tilt angle of the unit" from
-    fixed mounts and from single-axis technologies with a fixed tilt
-    angle, so on paper a tracker's number is its axis tilt. The
-    California data says otherwise. Tracker tilts are bimodal: a modal
-    0, and a second cluster at 45, 52 and 60 degrees — textbook tracker
-    rotation limits, not axis tilts. Eland Solar reports 60 across
-    618 MW, as do Scarlet and Sandrini at 200 MW each. No utility-scale
-    tracker stands its axis at 60 degrees; those respondents answered a
-    different question from the one asked.
+    Stored raw rather than interpreted, because the number means
+    different things on different mounts and only the power model has
+    the context to tell them apart. On a fixed mount it is the panel
+    angle. On a tracker, EIA form question 30b asks for the axis tilt,
+    but a third of the tracked capacity that answers gives 45, 52 or
+    60 degrees — rotation limits, not axis tilts. No utility-scale
+    tracker stands its axis at 60 degrees.
 
-    So the reported value is used only where it is unambiguous, on
-    fixed mounts. Trackers get a horizontal axis, which is both the
-    standard utility-scale design and the modal reported value. This
-    discards a real number for 13% of fleet capacity, which is the
-    point — a 60 degree axis tilt would bend those plants' output
-    curves badly, and wrongly.
+    Both readings are useful and neither is guesswork: below about 30
+    degrees the number can only be an axis tilt, above it can only be a
+    rotation limit. `features/power.py` makes that split. Throwing the
+    value away here would lose a real per-plant limit for 2.7 GW.
+
+    A blank on a fixed mount takes the fleet's tilt, because a panel
+    angle it must have. A blank on a tracker becomes zero, which reads
+    as a flat axis and leaves the rotation limit to the fleet default —
+    the same answer as the 4.9 GW that reports zero outright.
     """
     reported = pd.to_numeric(merged["tilt"], errors="coerce")
     is_fixed = merged["tracking"] == "fixed"
-    tilt = pd.Series(FALLBACK_AXIS_TILT, index=merged.index, dtype="float64")
-    tilt[is_fixed] = reported[is_fixed].fillna(FALLBACK_FIXED_TILT)
-    return tilt.astype("float64")
+    blank = pd.Series(FALLBACK_AXIS_TILT, index=merged.index, dtype="float64")
+    blank[is_fixed] = FALLBACK_FIXED_TILT
+    return reported.fillna(blank).astype("float64")
 
 
 def write_registry(df: pd.DataFrame, path: Path = REGISTRY_PATH) -> None:
