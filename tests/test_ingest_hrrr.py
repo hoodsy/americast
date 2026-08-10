@@ -149,7 +149,9 @@ def test_finalize_conforms_to_schema() -> None:
 def test_build_loops_all_48(monkeypatch: pytest.MonkeyPatch) -> None:
     fetched: list[int] = []
 
-    def fake_fetch(run_time: pd.Timestamp, fhour: int) -> list[str]:
+    def fake_fetch(
+        run_time: pd.Timestamp, fhour: int, scratch: object = None
+    ) -> list[str]:
         fetched.append(fhour)
         return ["sentinel"]
 
@@ -198,3 +200,172 @@ def test_pilot_is_resumable(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     second = pilot(tmp_path, plants)
     assert second == 0, "existing files are the manifest; nothing refetched"
+
+
+# --- backfill -------------------------------------------------------
+
+
+def test_runs_lists_every_target_hour() -> None:
+    out = hrrr.runs("2023-01-01", "2023-01-03", hours=(6, 18))
+    assert len(out) == 6
+    assert out[0] == pd.Timestamp("2023-01-01 06:00", tz="UTC")
+    assert out[1] == pd.Timestamp("2023-01-01 18:00", tz="UTC")
+    assert out[-1] == pd.Timestamp("2023-01-03 18:00", tz="UTC")
+
+
+def test_pending_skips_stored_files_and_archive_holes(tmp_path) -> None:
+    targets = hrrr.runs("2023-01-01", "2023-01-04", hours=(6,))
+    # Target 0 is already stored on disk.
+    hrrr.write(finalize(raw_extract(), targets[0], 1), tmp_path)
+    # Targets 1-3 are recorded as missing, partial, failed.
+    for run_time, status in zip(targets[1:], ["missing", "partial", "failed"]):
+        hrrr.record(
+            {
+                "run_time": run_time.isoformat(),
+                "status": status,
+                "fhours": 0,
+                "rows": 0,
+                "seconds": 1.0,
+            },
+            tmp_path,
+        )
+    todo = hrrr.pending(targets, tmp_path)
+    assert todo == targets[2:], "stored and missing drop out; partial/failed return"
+
+
+def test_manifest_roundtrip(tmp_path) -> None:
+    row = {
+        "run_time": "2023-01-01T06:00:00+00:00",
+        "status": "ok",
+        "fhours": 48,
+        "rows": 44544,
+        "seconds": 401.2,
+    }
+    hrrr.record(row, tmp_path)
+    hrrr.record({**row, "run_time": "2023-01-02T06:00:00+00:00"}, tmp_path)
+    out = hrrr.read_manifest(tmp_path)
+    assert len(out) == 2, "second line appends, header written once"
+    assert list(out.columns) == hrrr.MANIFEST_COLUMNS
+    assert out["run_time"].iloc[0] == pd.Timestamp("2023-01-01 06:00", tz="UTC")
+
+
+def test_build_skips_a_hole_and_keeps_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_attempt(
+        run_time: pd.Timestamp, fhour: int, scratch: object = None
+    ) -> list[str] | None:
+        return None if fhour == 13 else ["sentinel"]
+
+    monkeypatch.setattr(hrrr, "attempt", fake_attempt)
+    monkeypatch.setattr(hrrr, "extract", lambda dss, plants: raw_extract(len(plants)))
+
+    out = build(RUN, pd.DataFrame({"plant_id": [1, 2]}))
+    assert out["lead_hours"].nunique() == 47
+    assert 13 not in set(out["lead_hours"])
+    assert len(out) == 47 * 2, "one hole costs its own hour and nothing else"
+
+
+def test_build_abandons_a_run_absent_from_the_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tried: list[int] = []
+
+    def fake_attempt(
+        run_time: pd.Timestamp, fhour: int, scratch: object = None
+    ) -> None:
+        tried.append(fhour)
+
+    monkeypatch.setattr(hrrr, "attempt", fake_attempt)
+    out = build(RUN, pd.DataFrame({"plant_id": [1]}))
+    assert out.empty
+    assert list(out.columns) == [f.name for f in HRRR_WEATHER]
+    assert tried == [1, 2, 3], "stop after three dead hours, not 48"
+
+
+def test_attempt_retries_then_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    def always_fails(
+        run_time: pd.Timestamp, fhour: int, scratch: object = None
+    ) -> list[str]:
+        calls.append(fhour)
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(hrrr, "fetch", always_fails)
+    monkeypatch.setattr(hrrr.time, "sleep", lambda s: None)
+    assert hrrr.attempt(RUN, 5) is None
+    assert len(calls) == hrrr.TRIES
+
+
+def test_attempt_returns_after_a_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def fails_once(
+        run_time: pd.Timestamp, fhour: int, scratch: object = None
+    ) -> list[str]:
+        calls.append(fhour)
+        if len(calls) == 1:
+            raise OSError("connection reset")
+        return ["sentinel"]
+
+    monkeypatch.setattr(hrrr, "fetch", fails_once)
+    monkeypatch.setattr(hrrr.time, "sleep", lambda s: None)
+    assert hrrr.attempt(RUN, 5) == ["sentinel"]
+    assert len(calls) == 2
+
+
+def test_one_stores_a_full_run(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build(
+        run_time: pd.Timestamp, plants: pd.DataFrame, scratch: object = None
+    ) -> pd.DataFrame:
+        return pd.concat(
+            [finalize(raw_extract(), run_time, f) for f in range(1, 49)],
+            ignore_index=True,
+        )
+
+    monkeypatch.setattr(hrrr, "build", fake_build)
+    row = hrrr.one(RUN, tmp_path)
+    assert row["status"] == "ok"
+    assert row["fhours"] == 48
+    assert row["rows"] == 48 * 3
+    assert hrrr.run_path(RUN, tmp_path).exists()
+
+
+def test_one_reports_a_missing_run_without_writing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    empty = pd.DataFrame(columns=[f.name for f in HRRR_WEATHER])
+    monkeypatch.setattr(hrrr, "build", lambda r, p, s=None: empty)
+    row = hrrr.one(RUN, tmp_path)
+    assert row["status"] == "missing"
+    assert row["fhours"] == 0
+    assert not hrrr.run_path(RUN, tmp_path).exists()
+
+
+def test_one_converts_a_crash_into_a_status(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explodes(
+        run_time: pd.Timestamp, plants: pd.DataFrame, scratch: object = None
+    ) -> pd.DataFrame:
+        raise RuntimeError("cfgrib fell over")
+
+    monkeypatch.setattr(hrrr, "build", explodes)
+    row = hrrr.one(RUN, tmp_path)
+    assert row["status"] == "failed", "a worker must never raise into the pool"
+    assert not hrrr.run_path(RUN, tmp_path).exists()
+
+
+def test_verify_reports_stored_shape(tmp_path) -> None:
+    frame = pd.concat(
+        [finalize(raw_extract(), RUN, f) for f in range(1, 49)], ignore_index=True
+    )
+    hrrr.write(frame, tmp_path)
+    out = hrrr.verify(tmp_path)
+    assert len(out) == 1
+    assert out["fhours"].iloc[0] == 48
+    assert out["plants"].iloc[0] == 3
+    assert out["rows"].iloc[0] == 144
