@@ -51,6 +51,25 @@ HRRR_WEATHER = pa.schema(
 # capacity-dominant type when a plant mixes them. county and
 # balancing_authority (EIA code, e.g. CISO/LDWP/BANC/IID) support
 # sub-state grouping; unknowns are filled with "UNKNOWN", never null.
+#
+# capacity_mw_ac is the grid-side limit; dc_capacity_mw is the panel
+# side. Their ratio is the inverter loading ratio, and the gap between
+# them is what makes a plant clip on a clear midday.
+#
+# tilt and azimuth are degrees, azimuth clockwise from true north. What
+# they describe depends on tracking: for "fixed" they are the panel
+# plane, for "single_axis" they are the tracker axis. A north-south
+# axis is therefore recorded as 0 or 180 — the same line either way.
+# Never average azimuth across plants; 0 and 180 average to an
+# east-west axis that exists nowhere.
+#
+# tilt is EIA's reported value only for fixed mounts. Trackers are
+# stored flat, because EIA's tracker tilts are widely misreported as
+# rotation limits — see _array_tilt in ingest/eia860.py.
+#
+# operating_date is the month the plant's first phase started
+# generating, stored so historical aggregation can drop plants that did
+# not exist yet.
 PLANTS_CA = pa.schema(
     [
         pa.field("plant_id", pa.int64(), nullable=False),
@@ -58,8 +77,12 @@ PLANTS_CA = pa.schema(
         pa.field("latitude", pa.float64(), nullable=False),
         pa.field("longitude", pa.float64(), nullable=False),
         pa.field("capacity_mw_ac", pa.float64(), nullable=False),
+        pa.field("dc_capacity_mw", pa.float64(), nullable=False),
         pa.field("tracking", pa.string(), nullable=False),
+        pa.field("tilt", pa.float64(), nullable=False),
+        pa.field("azimuth", pa.float64(), nullable=False),
         pa.field("county", pa.string(), nullable=False),
         pa.field("balancing_authority", pa.string(), nullable=False),
+        pa.field("operating_date", pa.timestamp("us", tz="UTC"), nullable=False),
     ]
 )
