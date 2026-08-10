@@ -42,33 +42,77 @@ Measured on 2026-08-10, before any of this was written:
 | `extract` (sample at 928 plants) | 0.20 s |
 
 Two fetches used 23.3 s of wall time but only 2.3 s of CPU. The cost is
-waiting for S3 round-trips, not computing. Peak memory is 406 MB per
-process.
+waiting for S3 round-trips, not computing.
 
 Two conclusions:
 
 1. `extract` needed no work. Herbie caches its BallTree already, so the
    nearest-gridpoint search is not the bottleneck. An earlier guess that
    it was is recorded here because the measurement is what settled it.
-2. The worker count is limited by memory, not by cores. 12 workers use
-   about 4.8 GB and well under one core of real work. Twelve workers
-   turn pass 1 from 34 hours into roughly 12-15 hours.
+2. The worker count is limited by memory, not by cores.
+
+That same benchmark also reported 406 MB per process, and that number
+was wrong in the way that matters. See the next section.
+
+## Memory: one run per worker
+
+A worker peaks at 1.4-1.6 GB while it does one run, not the 406 MB
+above. 406 MB was the peak across two fetches. A full run is 48.
+
+Worse, the cost did not stop there. The whole fetch path leaves about
+4 MB behind per forecast hour that the allocator never returns to the
+OS. No single stage is at fault: decode, `extract` and `write` each
+measured flat over hundreds of calls, and Python object counts stay
+level. It is native heap the process keeps after allocating and freeing
+~100 MB of grid arrays 48 times per run.
+
+4 MB is invisible over the 2 fetches of the benchmark. A worker that
+lives for 9 runs makes 432 fetches, and 432 x 4 MB is 1.7 GB on top of
+its working set.
+
+On 2026-08-10 that arithmetic crashed the machine. Twelve workers
+reached 4.5 GB each, ~37 GB together, drove swap from nothing to 35 GB
+on a 16 GB Mac, and the machine went down mid-backfill.
+
+The fix is `max_tasks_per_child=1`: a worker does one run and is
+replaced. Memory cannot compound past one run, and a fresh process costs
+~3 s of imports against ~700 s of work. Measured after the change: three
+workers peaked at 1503, 1627 and 1406 MB, and the three that replaced
+them started at 209, 213 and 242 MB. Swap did not move. Run time per run
+was unchanged at 658-670 s.
+
+**Measure with the footprint, never with RSS.** macOS RSS excludes
+compressed memory. During the crash the workers reported 63-442 MB RSS
+while really holding 4.5 GB, ~94% of it compressed. RSS made a machine-
+killing leak look like a healthy pool inside its budget:
+
+```sh
+top -l 1 -o mem -stats pid,command,mem,cmprs   # mem is the truth
+sysctl vm.swapusage                            # whole-machine pressure
+```
+
+Also note that `pgrep -f americast.ingest.hrrr` does not match the
+pool's spawn-mode children. Killing the driver leaves the workers alive
+as orphans, still holding the memory. Kill the child pids directly.
 
 ## Design
 
 ```
-runs()  ->  pending()  ->  ProcessPoolExecutor(12)
+runs()  ->  pending()  ->  ProcessPoolExecutor(4, max_tasks_per_child=1)
                                   |
                         worker: own scratch dir, own pid
                                   |
                         build() -> write() -> record
                                   |
                         driver appends manifest.csv
+                                  |
+                        worker exits, a fresh one takes the next run
 ```
 
 One worker takes one run and calls `build()` unchanged from the pilot.
 The parallel unit is the run, so `extract`, `finalize` and `write` were
-not touched.
+not touched. A worker handles exactly one run and is then replaced; see
+the memory section for why.
 
 **Scratch isolation.** Each worker uses `data/tmp/herbie/w<pid>` and
 deletes it after every run. On 2026-08-07 two processes shared one
@@ -108,19 +152,23 @@ network rather than absent data.
 ```sh
 # Pass 1: the pilot month. Run the golden tests before going further.
 caffeinate -i uv run python -m americast.ingest.hrrr \
-    --hours 6 --start 2024-06-01 --end 2024-06-30 --workers 12
+    --hours 6 --start 2024-06-01 --end 2024-06-30 --workers 4
 
 # Pass 2: 06z across the whole window.
 caffeinate -i uv run python -m americast.ingest.hrrr \
-    --hours 6 --start 2023-01-01 --end 2026-08-09 --workers 12
+    --hours 6 --start 2023-01-01 --end 2026-08-09 --workers 4
 
 # Pass 3, later.
 caffeinate -i uv run python -m americast.ingest.hrrr \
-    --hours 0,12,18 --start 2023-01-01 --end 2026-08-09 --workers 12
+    --hours 0,12,18 --start 2023-01-01 --end 2026-08-09 --workers 4
 ```
 
 Use `caffeinate -i` so the machine does not sleep. Run only one backfill
 process at a time.
+
+Four workers, not twelve: at ~1.6 GB each at peak that is ~6.4 GB, which
+a 16 GB machine survives next to a browser and an editor. Raise the count
+only after you watch `top -stats mem,cmprs` through a few runs.
 
 ## After a schema change, clear the store first
 

@@ -419,7 +419,7 @@ def backfill(
     start: str,
     end: str,
     hours: tuple[int, ...] = (6,),
-    workers: int = 12,
+    workers: int = 4,
     root: Path = HRRR_DIR,
 ) -> int:
     """Fetch every pending run from start to end with a pool of workers.
@@ -428,6 +428,23 @@ def backfill(
     the only process that touches the manifest, so its lines never
     interleave. Each fetch waits on S3 far more than it uses the CPU,
     so workers can exceed the core count.
+
+    One run per worker, then the worker is replaced. No single stage
+    leaks — decode, extract and write all measured flat over hundreds of
+    calls — but the whole fetch path leaves about 4 MB behind per
+    forecast hour that the allocator never returns to the OS. That is
+    invisible over the 2 fetches this was first benchmarked on and fatal
+    over the 432 a long-lived worker makes: on 2026-08-10 twelve workers
+    reached 4.5 GB each, drove swap to 35 GB and crashed a 16 GB
+    machine. Retiring a worker after one run bounds it at one run's
+    working set and costs ~3 s of startup against ~700 s of work.
+    Measured on 2026-08-10: workers peaked at 1.4-1.6 GB, and their
+    replacements started at 209-242 MB.
+
+    Four workers, not twelve, for the same reason: one run costs ~1.6 GB
+    at peak, not the 406 MB read off a two-fetch benchmark. Four fit a
+    16 GB machine beside a browser and an editor. Raise the count only
+    after watching `top -stats mem,cmprs` through a few runs.
     """
     targets = runs(start, end, hours)
     todo = pending(targets, root)
@@ -441,7 +458,7 @@ def backfill(
     shutil.rmtree(GRIB_TMP, ignore_errors=True)
     started = time.perf_counter()
     done = 0
-    with ProcessPoolExecutor(max_workers=workers) as pool:
+    with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=1) as pool:
         futures = [pool.submit(one, run_time, root) for run_time in todo]
         for future in as_completed(futures):
             row = future.result()
@@ -488,7 +505,7 @@ if __name__ == "__main__":
     parser.add_argument("--start", default="2023-01-01")
     parser.add_argument("--end", default=str(yesterday))
     parser.add_argument("--hours", default="6", help="UTC run hours, comma separated")
-    parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
 
     run_hours = tuple(int(h) for h in args.hours.split(","))
