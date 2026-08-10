@@ -6,6 +6,7 @@ from americast.features.power import (
     HORIZON_ZENITH,
     MAX_ROTATION,
     orient,
+    poa,
     position,
 )
 
@@ -265,3 +266,56 @@ def test_mixed_fleet_keeps_each_plant_on_its_own_parameters() -> None:
     assert out.loc[1, "surface_tilt"].max() == pytest.approx(45.0, abs=1e-6)
     assert out.loc[2, "surface_tilt"].max() == pytest.approx(MAX_ROTATION, abs=1e-6)
     assert out.loc[3, "surface_tilt"].max() > 45.0, "a leaning axis is not capped at 45"
+
+
+# --- poa ------------------------------------------------------------
+
+
+def lit_frame(tracking: str, times: list[str], dni, dhi, dswrf, **kw) -> pd.DataFrame:
+    rig = mounted(tracking, **kw)
+    frame = position(hours(times), rig)
+    frame["dni"], frame["dhi"], frame["dswrf"] = dni, dhi, dswrf
+    return poa(orient(frame, rig))
+
+
+def test_poa_is_zero_after_dark() -> None:
+    """Even handed absurd irradiance, a dark hour must collect nothing."""
+    out = lit_frame("single_axis", ["2024-06-21 08:00"], 3200.0, 500.0, 900.0)
+    assert out["cos_zenith"].iloc[0] == 0.0, "this hour really is dark"
+    assert out["poa"].iloc[0] == 0.0, "HRRR terminator garbage must not light a panel"
+
+
+def test_tracker_beats_flat_ground_in_the_morning() -> None:
+    """The whole reason 18.2 of the fleet's 21.5 GW tracks."""
+    out = lit_frame("single_axis", ["2024-06-21 14:00"], 800.0, 100.0, 350.0)
+    assert out["poa"].iloc[0] > 350.0 * 1.2, "a tilted panel collects far more"
+
+
+def test_flat_panel_at_noon_matches_horizontal_irradiance() -> None:
+    """With the panel flat and the sun overhead, poa should track ghi."""
+    out = lit_frame("fixed", ["2024-06-21 20:00"], 900.0, 90.0, 960.0, tilt=0.0)
+    assert out["poa"].iloc[0] == pytest.approx(960.0, rel=0.05)
+
+
+def test_poa_never_negative_on_a_full_day() -> None:
+    day = pd.date_range("2024-06-21", periods=24, freq="1h", tz="UTC")
+    times = [str(t) for t in day]
+    for tracking in ["fixed", "single_axis", "dual_axis", "unknown"]:
+        out = lit_frame(tracking, times, 700.0, 120.0, 500.0, tilt=22.0)
+        assert (out["poa"] >= 0.0).all(), f"{tracking} produced negative light"
+        assert out["poa"].notna().all(), f"{tracking} left a NaN"
+
+
+def test_negative_diffuse_does_not_subtract_light() -> None:
+    """HRRR's terminator noise reaches -3.2 W/m2; it must not eat the beam."""
+    out = lit_frame("fixed", ["2024-06-21 18:00"], 700.0, -3.2, 400.0, tilt=22.0)
+    assert out["poa"].iloc[0] > 0.0
+
+
+def test_dual_axis_collects_the_most() -> None:
+    """Pointing straight at the sun beats a single axis, which beats flat."""
+    args = (["2024-06-21 15:00"], 850.0, 110.0, 420.0)
+    dual = lit_frame("dual_axis", *args)["poa"].iloc[0]
+    single = lit_frame("single_axis", *args)["poa"].iloc[0]
+    flat = lit_frame("fixed", *args, tilt=0.0)["poa"].iloc[0]
+    assert dual > single > flat

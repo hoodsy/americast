@@ -65,6 +65,23 @@ MAX_ROTATION = 60.0
 # backtracking, below.
 GROUND_COVER = 0.33
 
+# How the sky's diffuse light is spread across the dome. Isotropic
+# treats it as uniform, which is simple and always underestimates a
+# clear sky, because more diffuse light arrives from right around the
+# sun than from the opposite horizon. Hay-Davies adds that circumsolar
+# brightening. Perez adds a horizon band as well and is the most
+# accurate published model, but it leans on empirical coefficients that
+# misbehave at low sun — the hours a tracker is already working hardest.
+# Hay-Davies is the steadier choice, and a steady bias is what the
+# learned model downstream is best placed to absorb.
+SKY_MODEL = "haydavies"
+
+# Fraction of light the ground throws back up at the panels. Not
+# reported per plant, and it only reaches a panel that is tilted, so it
+# is a small term for a fleet that spends midday lying flat. 0.25 is
+# pvlib's default and sits between desert sand and farmland.
+GROUND_ALBEDO = 0.25
+
 
 def position(hours: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     """Solar zenith and azimuth for every (forecast hour, plant) row.
@@ -176,6 +193,54 @@ def orient(positioned: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     out = rows.drop(columns=["tracking", "tilt", "azimuth"])
     out["surface_tilt"] = tilt
     out["surface_azimuth"] = azimuth
+    return out
+
+
+def poa(oriented: pd.DataFrame) -> pd.DataFrame:
+    """Irradiance landing on the panel face, in W/m².
+
+    oriented is `orient`'s output, carrying both the sun's position and
+    the plane the panels present to it, alongside HRRR's dni, dhi and
+    dswrf. Returns it with `poa` added.
+
+    Three separate contributions arrive at a panel, and pvlib sums
+    them. The direct beam, dni scaled by how squarely it strikes the
+    glass. Light scattered by the sky dome, from dhi, spread according
+    to SKY_MODEL. And light bouncing off the ground, which reaches only
+    a tilted panel and is small for a fleet that lies flat at midday.
+
+    This is the step where a panel can beat flat ground. A tracker
+    facing a low morning sun collects far more than a horizontal
+    surface at the same moment, which is the whole reason 18.2 of the
+    fleet's 21.5 GW tracks — and it is invisible in dswrf alone.
+
+    Everything is forced to zero once the sun is at the horizon.
+    Nothing else in this module can do it: the parked-flat panel from
+    `orient` still presents a face to a sun 89.4 degrees up, and HRRR's
+    dni there can read 3200 W/m², which would put 34 W/m² on the glass
+    after dark. cos_zenith is already zero on those rows, so this is
+    the same horizon rule applied where it would otherwise leak.
+    """
+    extra = pvlib.irradiance.get_extra_radiation(
+        pd.DatetimeIndex(oriented["valid_time"])
+    )
+    sky = pvlib.irradiance.get_total_irradiance(
+        surface_tilt=oriented["surface_tilt"].to_numpy(),
+        surface_azimuth=oriented["surface_azimuth"].to_numpy(),
+        solar_zenith=oriented["zenith"].to_numpy(),
+        solar_azimuth=oriented["solar_azimuth"].to_numpy(),
+        dni=oriented["dni"].clip(lower=0.0).to_numpy(),
+        ghi=oriented["dswrf"].clip(lower=0.0).to_numpy(),
+        dhi=oriented["dhi"].clip(lower=0.0).to_numpy(),
+        dni_extra=np.asarray(extra),
+        albedo=GROUND_ALBEDO,
+        model=SKY_MODEL,
+    )
+    total = pd.Series(np.asarray(sky["poa_global"]), index=oriented.index)
+    lit = oriented["cos_zenith"] > 0.0
+
+    out = oriented.copy()
+    out["poa"] = total.where(lit, 0.0).fillna(0.0)
     return out
 
 
