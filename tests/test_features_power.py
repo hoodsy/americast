@@ -2,7 +2,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from americast.features.power import HORIZON_ZENITH, position
+from americast.features.power import (
+    HORIZON_ZENITH,
+    MAX_ROTATION,
+    orient,
+    position,
+)
 
 # Kern County, roughly the fleet's centre of mass.
 LAT, LON = 35.0, -118.5
@@ -123,3 +128,93 @@ def test_matches_pvlib_directly() -> None:
     assert out["cos_zenith"].iloc[0] == pytest.approx(
         np.cos(np.radians(expected["apparent_zenith"].iloc[0])), abs=1e-9
     )
+
+
+# --- orient ---------------------------------------------------------
+
+
+def mounted(tracking: str, tilt: float = 0.0, azimuth: float = 180.0) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "plant_id": [1],
+            "latitude": [LAT],
+            "longitude": [LON],
+            "tracking": [tracking],
+            "tilt": [tilt],
+            "azimuth": [azimuth],
+        }
+    )
+
+
+def oriented(tracking: str, times: list[str], **kw) -> pd.DataFrame:
+    rig = mounted(tracking, **kw)
+    return orient(position(hours(times), rig), rig)
+
+
+def test_fixed_panels_never_move() -> None:
+    out = oriented("fixed", ["2024-06-21 15:00", "2024-06-21 20:00"], tilt=22.0, azimuth=170.0)
+    assert (out["surface_tilt"] == 22.0).all(), "a fixed panel is fixed"
+    assert (out["surface_azimuth"] == 170.0).all()
+
+
+def test_tracker_follows_the_sun_east_to_west() -> None:
+    morning = oriented("single_axis", ["2024-06-21 15:00"])
+    evening = oriented("single_axis", ["2024-06-22 02:00"])
+    assert morning["surface_azimuth"].iloc[0] < 180.0, "tilted toward the east"
+    assert evening["surface_azimuth"].iloc[0] > 180.0, "tilted toward the west"
+
+
+def test_tracker_lies_flat_at_solar_noon() -> None:
+    """A north-south axis has nothing to rotate for when the sun is due south."""
+    out = oriented("single_axis", ["2024-06-21 20:00"])
+    assert out["surface_tilt"].iloc[0] < 12.0
+
+
+def test_tracker_stops_at_the_rotation_limit() -> None:
+    day = pd.date_range("2024-06-21 12:00", periods=14, freq="1h", tz="UTC")
+    out = oriented("single_axis", [str(t) for t in day])
+    assert out["surface_tilt"].max() <= MAX_ROTATION + 1e-9, "cannot exceed its limit"
+    assert out["surface_tilt"].max() > 30.0, "and does swing a long way"
+
+
+def test_dual_axis_points_straight_at_the_sun() -> None:
+    out = oriented("dual_axis", ["2024-06-21 16:00"])
+    assert out["surface_tilt"].iloc[0] == pytest.approx(out["zenith"].iloc[0])
+    assert out["surface_azimuth"].iloc[0] == pytest.approx(out["solar_azimuth"].iloc[0])
+
+
+def test_unknown_tracking_is_treated_as_a_tracker() -> None:
+    guess = oriented("unknown", ["2024-06-21 15:00"])
+    tracker = oriented("single_axis", ["2024-06-21 15:00"])
+    assert guess["surface_tilt"].iloc[0] == pytest.approx(tracker["surface_tilt"].iloc[0])
+
+
+def test_every_mount_parks_flat_after_dark() -> None:
+    """NaN here would spread through the irradiance maths and poison a whole day."""
+    for tracking in ["fixed", "single_axis", "dual_axis", "unknown"]:
+        out = oriented(tracking, ["2024-06-21 08:00"], tilt=22.0)
+        assert out["cos_zenith"].iloc[0] == 0.0, "this hour really is dark"
+        assert out["surface_tilt"].iloc[0] == 0.0, f"{tracking} should park flat"
+
+
+def test_no_nan_survives_a_full_day() -> None:
+    day = pd.date_range("2024-06-21", periods=24, freq="1h", tz="UTC")
+    for tracking in ["fixed", "single_axis", "dual_axis", "unknown"]:
+        out = oriented(tracking, [str(t) for t in day], tilt=22.0)
+        assert out["surface_tilt"].notna().all(), f"{tracking} left a NaN tilt"
+        assert out["surface_azimuth"].notna().all(), f"{tracking} left a NaN azimuth"
+
+
+def test_tracker_axis_is_forced_north_south() -> None:
+    """The registry's tracker azimuth is not trusted; the axis is always N-S."""
+    as_reported = oriented("single_axis", ["2024-06-21 15:00"], azimuth=90.0)
+    north_south = oriented("single_axis", ["2024-06-21 15:00"], azimuth=180.0)
+    assert as_reported["surface_tilt"].iloc[0] == pytest.approx(
+        north_south["surface_tilt"].iloc[0]
+    )
+
+
+def test_unrecognised_tracking_fails_loudly() -> None:
+    rig = mounted("bifacial_carport")
+    with pytest.raises(ValueError, match="unrecognised tracking types"):
+        orient(position(hours(["2024-06-21 20:00"]), rig), rig)
