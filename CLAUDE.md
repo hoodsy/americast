@@ -1,3 +1,5 @@
+Communicate using ASD-STE100 technical English
+
 1. Work one gate at a time. Never start the next gate without an explicit "go".
 2. Before writing any new module, explain in plain language what it will do,
    what the inputs and outputs are, and why this design. Wait for approval.
