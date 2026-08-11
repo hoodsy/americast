@@ -111,8 +111,8 @@ def by_hour(rows: pd.DataFrame) -> go.Figure:
             y=mae.to_numpy(),
             name=name,
             mode="lines+markers",
-            line=dict(color=color, width=2),
-            marker=dict(size=8, line=dict(width=2, color=SURFACE)),
+            line={"color": color, "width": 2},
+            marker={"size": 8, "line": {"width": 2, "color": SURFACE}},
             hovertemplate="%{x}:00<br>%{y:,.0f} MW<extra>" + name + "</extra>",
         )
     chart = _chrome(figure, "Error by local hour", "Mean absolute error (MW)")
@@ -155,7 +155,7 @@ def days(table: pd.DataFrame, rows: pd.DataFrame, region=CAISO_CA) -> list[go.Fi
                 y=curve[column],
                 name=name,
                 mode="lines",
-                line=dict(color=color, width=2),
+                line={"color": color, "width": 2},
                 hovertemplate="%{y:,.0f} MW<extra>" + name + "</extra>",
             )
         # No x-axis title: plotly stacks a date under the time ticks on
@@ -191,12 +191,12 @@ def write(table: pd.DataFrame, path: Path = REPORT_PATH) -> None:
 def _chrome(figure: go.Figure, title: str, y_title: str) -> go.Figure:
     """One recessive, legible look for every figure on the page."""
     figure.update_layout(
-        title=dict(text=title, font=dict(size=17, color=INK)),
+        title={"text": title, "font": {"size": 17, "color": INK}},
         paper_bgcolor=SURFACE,
         plot_bgcolor=SURFACE,
-        font=dict(family="system-ui, -apple-system, sans-serif", color=INK, size=13),
-        legend=dict(orientation="h", y=-0.18, font=dict(color=INK)),
-        margin=dict(t=56, b=80, l=72, r=24),
+        font={"family": "system-ui, -apple-system, sans-serif", "color": INK, "size": 13},
+        legend={"orientation": "h", "y": -0.18, "font": {"color": INK}},
+        margin={"t": 56, "b": 80, "l": 72, "r": 24},
         height=420,
         bargap=0.28,
     )
@@ -204,14 +204,14 @@ def _chrome(figure: go.Figure, title: str, y_title: str) -> go.Figure:
         title_text=y_title,
         gridcolor=GRID,
         zerolinecolor=GRID,
-        tickfont=dict(color=MUTED),
-        title_font=dict(color=MUTED),
+        tickfont={"color": MUTED},
+        title_font={"color": MUTED},
     )
     figure.update_xaxes(
         showgrid=False,
         linecolor=GRID,
-        tickfont=dict(color=MUTED),
-        title_font=dict(color=MUTED),
+        tickfont={"color": MUTED},
+        title_font={"color": MUTED},
     )
     return figure
 

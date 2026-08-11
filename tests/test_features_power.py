@@ -616,6 +616,21 @@ def test_the_ceiling_never_dips_below_a_real_sky() -> None:
     assert ceiling["dswrf"].max() < 1200.0, "and not more than physics allows"
 
 
+def test_a_filtered_frame_still_gets_its_own_sky() -> None:
+    """An index that is not 0..n would misalign a label-aligned mask."""
+    day = pd.date_range("2024-06-21", periods=24, freq="1h", tz="UTC")
+    rig = mounted("single_axis")
+    frame = position(hours([str(t) for t in day]), rig)
+    frame["dni"], frame["dhi"], frame["dswrf"] = 0.0, 0.0, 0.0
+    oriented = orient(frame, rig)
+
+    whole = clear(oriented, rig)
+    afternoon = clear(oriented[oriented["valid_time"].dt.hour >= 18], rig)
+    expected = whole[whole["valid_time"].dt.hour >= 18]["dswrf"].to_numpy()
+    assert afternoon["dswrf"].to_numpy() == pytest.approx(expected)
+    assert afternoon["dswrf"].max() > 0.0, "the afternoon is not dark"
+
+
 def test_turbidity_follows_the_place() -> None:
     """Coastal air is cleaner than desert air, and it must show."""
     coastal = mounted("fixed")

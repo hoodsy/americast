@@ -18,7 +18,7 @@ baseline needs.
 """
 
 import warnings
-from functools import lru_cache
+from functools import cache
 
 import numpy as np
 import pandas as pd
@@ -492,6 +492,11 @@ def clear(oriented: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     bias cancels; a hard cap on the ratio would not have that property
     and is deliberately absent.
     """
+    # The merge hands back a fresh RangeIndex, so `rows` and `oriented`
+    # only line up positionally. Every value below is put back through
+    # numpy for that reason: a Series built on one index and masked by a
+    # Series built on the other would align by label and silently
+    # produce NaN for a caller who passed a filtered frame.
     coords = plants[["plant_id", "latitude", "longitude"]]
     rows = oriented.merge(coords, on="plant_id", how="left")
     relative_airmass = pvlib.atmosphere.get_relative_airmass(rows["zenith"])
@@ -505,11 +510,11 @@ def clear(oriented: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
         np.asarray(extra),
     )
 
-    lit = rows["cos_zenith"] > 0.0
+    lit = (oriented["cos_zenith"] > 0.0).to_numpy()
     out = oriented.copy()
     for column, field in (("dswrf", "ghi"), ("dni", "dni"), ("dhi", "dhi")):
-        values = pd.Series(np.asarray(sky[field]), index=oriented.index)
-        out[column] = values.where(lit, 0.0).fillna(0.0)
+        values = np.nan_to_num(np.asarray(sky[field]), nan=0.0)
+        out[column] = np.where(lit, values, 0.0)
     return out
 
 
@@ -569,7 +574,7 @@ def _ineichen(
         )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _turbidity_at(latitude: float, longitude: float, month: int) -> float:
     """Linke turbidity for one place in one month.
 

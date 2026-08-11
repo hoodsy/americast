@@ -80,6 +80,41 @@ def load(path: Path = STORE_PATH) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def verify(table: pd.DataFrame) -> dict:
+    """Value-level checks the schema cannot express. Reports, decides nothing.
+
+    The schema catches a wrong column, dtype or null. It cannot catch a
+    table that is correctly shaped and wrong, which is what this looks
+    for.
+
+    - `predicts_the_past`: rows where valid_time <= run_time. Any is a bug.
+    - `short_runs`: runs holding fewer than 47 hours, meaning the archive
+      had a hole or the fetch was interrupted.
+    - `missing_days`: calendar days in the span with no run at all.
+    - `unlabelled`: forecast hours the label store has not reached.
+    - `physical_mae` / `physical_bias`: how far the unfitted physics sits
+      from CAISO over daylight hours, in MW. Bias is the number to watch:
+      it moves with SYSTEM_LOSSES and with nothing else in the chain.
+    """
+    lit = table[(table["fleet_clear_mw"] > 0.0) & table["solar_mw"].notna()]
+    error = lit["fleet_ac_mw"] - lit["solar_mw"]
+    per_run = table.groupby("run_time").size()
+    run_days = pd.to_datetime(table["run_time"].unique()).normalize()
+    span = pd.date_range(run_days.min(), run_days.max(), freq="1D")
+
+    return {
+        "n_rows": len(table),
+        "n_runs": table["run_time"].nunique(),
+        "span": (table["valid_time"].min(), table["valid_time"].max()),
+        "predicts_the_past": int((table["valid_time"] <= table["run_time"]).sum()),
+        "short_runs": per_run[per_run < 47],
+        "missing_days": span.difference(run_days),
+        "unlabelled": int(table["solar_mw"].isna().sum()),
+        "physical_mae": error.abs().mean(),
+        "physical_bias": error.mean(),
+    }
+
+
 def _one_run(
     weather: pd.DataFrame, plants: pd.DataFrame, region: RegionConfig
 ) -> pd.DataFrame:

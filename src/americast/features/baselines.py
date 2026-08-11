@@ -94,6 +94,8 @@ def smart(table: pd.DataFrame, region: RegionConfig) -> pd.Series:
     long leads is the real test.
     """
     by_hour = _hourly_history(table, region)
+    if by_hour.empty:
+        return pd.Series(float("nan"), index=table.index)
     rolling = by_hour.rolling(PERSISTENCE_DAYS, min_periods=PERSISTENCE_DAYS).mean()
 
     daily = _daily_ratio(table, region)
@@ -173,6 +175,9 @@ def _hourly_history(table: pd.DataFrame, region: RegionConfig) -> pd.DataFrame:
     seven days that happened to have data.
     """
     history = _labelled_hours(table, region)
+    if history.empty:
+        return pd.DataFrame()
+
     grid = history.pivot_table(
         index="local_date", columns="local_hour", values="solar_mw", aggfunc="mean"
     )

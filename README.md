@@ -17,6 +17,14 @@ utility-scale solar output, hourly, in MW.
   registry from EIA-860 (2025 Early Release): 928 operating plants,
   23.88 GW AC, with county and balancing authority for sub-state grouping.
 
+- `data/hrrr/hrrr_<YYYYMMDD>_<HH>z.parquet` — HRRR forecasts sampled at
+  every plant, one file per model run, f01–f48. Weather grids are never
+  stored. Design and restart notes: `docs/hrrr_backfill.md`.
+- `data/train/table.parquet` — the model's training table: one row per
+  (run_time, valid_time), with zone weather, the physical model's
+  megawatts, calendar columns, the CAISO label and two baselines.
+  Details: `docs/training_table.md`.
+
 **Registry sanity check:** the CAISO-BA slice of the registry is 21.52 GW
 across 788 plants. Observed fuel-mix peak (Aug 2026) is 23.35 GW — higher,
 because (1) CAISO's balancing authority includes ~2.5 GW of solar in
@@ -24,6 +32,29 @@ Arizona and Nevada that a state-filtered registry excludes, and (2) the
 2025 filing cannot see plants energized in 2026. Including out-of-state
 CISO plants, installed CISO capacity is 24.0 GW and the peak/installed
 ratio is a physically sensible 0.97. Details: `docs/plant_registry.md`.
+
+## The physical model
+
+Before any learning, every plant is modelled from its own 3 km weather:
+sun position, panel orientation (fixed, single-axis with backtracking,
+dual-axis), transposition onto the panel face, cell temperature, DC
+power, then inverter losses and clipping. Those megawatts sum to county,
+zone and state. The same chain runs a second time on a clear sky, and
+the ratio of the two is the clearness index.
+
+On daylight hours across 2023-01 → 2024-10, the unfitted physics reaches
+**1141 MW mean absolute error** against CAISO, beating both persistence
+baselines (1262 and 1312 MW) and a naive zero (10,092 MW). That is the
+bar the Gate 5 model has to clear.
+
+Only the statewide number is graded. County and zone figures are
+physically-derived estimates that sum to it, and no hourly public truth
+exists to check them against.
+
+```sh
+uv run python -m americast.features.table    # rebuild the training table
+uv run python -m americast.features.report   # write data/reports/gate4.html
+```
 
 ## Setup
 

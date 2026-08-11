@@ -13,6 +13,11 @@ from americast.features.features import (
 TZ = "America/Los_Angeles"
 
 
+# Roughly where each zone's capacity sits, so a synthetic plant put in
+# a county gets a coordinate that belongs to it.
+COORDS = [(35.0, -118.5), (33.0, -115.5), (36.7, -119.8), (33.9, -116.5), (36.0, -120.7)]
+
+
 def registry(
     plant_ids=(1, 2),
     counties=("Kern", "Imperial"),
@@ -20,11 +25,12 @@ def registry(
     ba="CISO",
 ) -> pd.DataFrame:
     n = len(plant_ids)
+    places = [COORDS[i % len(COORDS)] for i in range(n)]
     return pd.DataFrame(
         {
             "plant_id": list(plant_ids),
-            "latitude": [35.0, 33.0][:n],
-            "longitude": [-118.5, -115.5][:n],
+            "latitude": [lat for lat, _ in places],
+            "longitude": [lon for _, lon in places],
             "capacity_mw_ac": list(capacities),
             "dc_capacity_mw": [c * 1.275 for c in capacities],
             "tracking": ["single_axis"] * n,
@@ -196,13 +202,18 @@ def test_the_index_columns_are_not_averaged() -> None:
     assert starts == [7, 8], "a row is still named by the hour it starts"
 
 
-def test_a_ragged_run_keeps_the_hours_it_can() -> None:
-    """A hole costs the hour before it, because that average has no partner."""
+def test_a_hole_costs_the_hour_before_it() -> None:
+    """Averaging 13:00 with 15:00 is not the mean of the 13:00 hour.
+
+    Some forecast hours were never archived, so this is a real case,
+    not a hypothetical one. The hour before the hole has no partner and
+    must leave rather than be averaged across the gap.
+    """
     frame = framed("2024-06-15 06:00", [1.0, 2.0, 3.0, 4.0])
     holed = frame[frame["lead_hours"] != 3]
     out = hourly(holed)
-    assert out["lead_hours"].tolist() == [1, 2]
-    assert out["fleet_ac_mw"].tolist() == [1.5, 3.0], "lead 2 averaged with lead 4"
+    assert out["lead_hours"].tolist() == [1], "lead 2 has no neighbour left"
+    assert out["fleet_ac_mw"].tolist() == [1.5]
 
 
 # --- calendar -------------------------------------------------------

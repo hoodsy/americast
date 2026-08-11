@@ -174,20 +174,26 @@ def hourly(frame: pd.DataFrame) -> pd.DataFrame:
     same forecast run — it is something the model already knew at
     run_time, not something the day revealed later.
 
-    The last forecast hour of each run has no successor and is dropped
-    rather than left as an instant. One hour in 48 is a cheap price for
-    a column that means exactly one thing everywhere.
+    A row survives only if the very next hour of the same run is
+    present. That drops the last forecast hour of every run, which has
+    no successor, and it drops the hour before a hole. Holes are real:
+    some forecast hours were never archived, and the backfill records
+    those runs as `partial`. Averaging across a two-hour gap would
+    quietly report the mean of 13:00 and 15:00 as the 13:00 hour, which
+    is not an hour mean of anything. One hour in 48 is a cheap price
+    for a column that means exactly one thing everywhere.
     """
     values = [c for c in frame.columns if c not in INDEX_COLUMNS]
     ordered = frame.sort_values(HOUR_KEYS)
     by_run = ordered.groupby("run_time")
 
-    nxt = by_run[values].shift(-1)
-    averaged = ordered.copy()
-    averaged[values] = (ordered[values] + nxt) / 2.0
+    next_value = by_run[values].shift(-1)
+    next_time = by_run["valid_time"].shift(-1)
+    adjacent = next_time - ordered["valid_time"] == pd.Timedelta(hours=1)
 
-    keep = by_run["valid_time"].transform("max") != ordered["valid_time"]
-    return averaged[keep].reset_index(drop=True)
+    averaged = ordered.copy()
+    averaged[values] = (ordered[values] + next_value) / 2.0
+    return averaged[adjacent].reset_index(drop=True)
 
 
 def calendar(frame: pd.DataFrame, timezone: str) -> pd.DataFrame:

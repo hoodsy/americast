@@ -171,3 +171,30 @@ def test_a_baseline_never_reads_its_own_answer(table: pd.DataFrame) -> None:
     graded = table.dropna(subset=["solar_mw", "baseline_clear_sky_mw"])
     error = (graded["baseline_clear_sky_mw"] - graded["solar_mw"]).abs()
     assert error.mean() > 100.0, "too good to be honest"
+
+
+# --- the report renders from the real table -------------------------
+
+
+def test_the_report_renders(table: pd.DataFrame) -> None:
+    """A smoke test over real data: plotly is happy, the page is whole."""
+    from americast.features import report
+
+    page = report.render(table)
+    assert page.startswith("<!doctype html>")
+    assert page.count("plotly-graph-div") == 4, "four figures on the page"
+
+
+def test_the_report_scores_every_predictor(table: pd.DataFrame) -> None:
+    from americast.features import report
+
+    scores = report.summarize(report.graded(table))
+    assert set(scores["predictor"]) == {
+        "Physical model",
+        "Clear-sky persistence",
+        "Smart persistence",
+        "Naive zero",
+    }
+    assert (scores["mae"] > 0).all()
+    worst = scores.loc[scores["mae"].idxmax(), "predictor"]
+    assert worst == "Naive zero", "every predictor must beat predicting nothing"
