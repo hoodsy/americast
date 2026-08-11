@@ -4,7 +4,9 @@ import pytest
 
 from americast.features.power import (
     HORIZON_ZENITH,
+    KELVIN_ZERO,
     MAX_ROTATION,
+    heat,
     orient,
     poa,
     position,
@@ -319,3 +321,84 @@ def test_dual_axis_collects_the_most() -> None:
     single = lit_frame("single_axis", *args)["poa"].iloc[0]
     flat = lit_frame("fixed", *args, tilt=0.0)["poa"].iloc[0]
     assert dual > single > flat
+
+
+# --- heat -----------------------------------------------------------
+
+
+def heated(
+    times: list[str],
+    dni=800.0,
+    dhi=100.0,
+    dswrf=500.0,
+    t2m=303.15,
+    w10m=3.0,
+    tracking="single_axis",
+    **kw,
+) -> pd.DataFrame:
+    frame = lit_frame(tracking, times, dni, dhi, dswrf, **kw)
+    frame["t2m"], frame["w10m"] = t2m, w10m
+    return heat(frame)
+
+
+def test_cell_runs_hotter_than_the_air() -> None:
+    """A panel in full sun sits well above the air around it."""
+    out = heated(["2024-06-21 20:00"])
+    air = out["t2m"].iloc[0] - KELVIN_ZERO
+    assert out["poa"].iloc[0] > 500.0, "this hour really is lit"
+    assert out["cell_temperature"].iloc[0] > air + 15.0
+
+
+def test_unlit_cell_sits_at_air_temperature() -> None:
+    """With no light to absorb, a panel is just an object in the dark."""
+    out = heated(["2024-06-21 08:00"], t2m=290.0)
+    assert out["poa"].iloc[0] == 0.0, "this hour really is dark"
+    assert out["cell_temperature"].iloc[0] == pytest.approx(290.0 - KELVIN_ZERO)
+
+
+def test_wind_cools_the_cell() -> None:
+    calm = heated(["2024-06-21 20:00"], w10m=0.5)
+    breezy = heated(["2024-06-21 20:00"], w10m=8.0)
+    assert breezy["cell_temperature"].iloc[0] < calm["cell_temperature"].iloc[0] - 5.0
+
+
+def test_kelvin_is_converted_to_celsius() -> None:
+    """HRRR stores Kelvin; nothing downstream would catch the confusion."""
+    out = heated(["2024-06-21 08:00"], t2m=300.0)
+    assert out["cell_temperature"].iloc[0] == pytest.approx(26.85, abs=0.01)
+
+
+def test_cell_temperature_stays_physical_over_a_day() -> None:
+    """A day-shaped sky, because a flat one is not a sky at all.
+
+    The beam has to fade as the sun nears the horizon. Held constant
+    instead, 800 W/m² of beam at a zenith of 88.9 degrees drives a
+    dual-axis panel to 122 C — the transposition step multiplies the
+    diffuse by cos(aoi)/cos(zenith), and pvlib floors that denominator
+    at cos(89 degrees), so the ratio reaches 57. Real HRRR rows at that
+    zenith carry a beam near zero, so this never fires on stored data;
+    the ceiling below is measured from it. See docs for the audit.
+    """
+    day = pd.date_range("2024-06-21", periods=24, freq="1h", tz="UTC")
+    times = [str(t) for t in day]
+    for tracking in ["fixed", "single_axis", "dual_axis", "unknown"]:
+        rig = mounted(tracking, tilt=22.0)
+        frame = position(hours(times), rig)
+        frame["dni"] = 900.0 * frame["cos_zenith"]
+        frame["dhi"] = 100.0 * frame["cos_zenith"]
+        frame["dswrf"] = 850.0 * frame["cos_zenith"]
+        frame["t2m"], frame["w10m"] = 303.15, 3.0
+        out = heat(poa(orient(frame, rig)))
+        assert out["cell_temperature"].notna().all(), f"{tracking} left a NaN"
+        assert (out["cell_temperature"] > 0.0).all(), f"{tracking} froze a panel"
+        assert (out["cell_temperature"] < 85.0).all(), f"{tracking} melted a panel"
+
+
+def test_every_row_keeps_its_own_weather() -> None:
+    """A dark cold hour and a lit warm one, in that order."""
+    out = heated(["2024-06-21 08:00", "2024-06-21 20:00"], t2m=[310.0, 280.0])
+    assert list(out["t2m"]) == [310.0, 280.0], "carried through untouched"
+    assert out["cell_temperature"].iloc[0] == pytest.approx(310.0 - KELVIN_ZERO), (
+        "the dark row must not collect the lit row's sun"
+    )
+    assert out["cell_temperature"].iloc[1] > 280.0 - KELVIN_ZERO + 15.0

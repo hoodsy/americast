@@ -5,10 +5,10 @@ gridpoint, and those estimates sum to county, zone and state. Only the
 state total can be graded against CAISO, but the levels below it are
 what a map needs, and they come free once the per-plant number exists.
 
-The chain is: where is the sun (`position`), how much light reaches
-the panel plane, how hot the cells get, and what the inverter lets
-through. This module holds one step at a time; `position` is the
-first.
+The chain is: where is the sun (`position`), where the panels point
+(`orient`), how much light reaches the panel plane (`poa`), how hot
+the cells get (`heat`), and what the inverter lets through. Each step
+takes the step before it and adds its columns.
 """
 
 import numpy as np
@@ -81,6 +81,23 @@ SKY_MODEL = "haydavies"
 # is a small term for a fleet that spends midday lying flat. 0.25 is
 # pvlib's default and sits between desert sand and farmland.
 GROUND_ALBEDO = 0.25
+
+# How the panels are mounted, for the cell temperature model. Every
+# utility-scale plant stands on an open rack, so that half is certain.
+# The glass/glass against glass/polymer half is not: EIA reports no
+# module construction, and the fleet holds both — glass and backsheet
+# on the older plants, glass on both faces on the bifacial ones built
+# since about 2021. Measured at 1000 W/m², the two sets run 2.9 to
+# 3.6 degrees apart across 1 to 5 m/s of wind, which is near 1% of
+# power. That is a steady bias for the learned model to absorb, not a
+# number worth guessing per plant.
+THERMAL_MOUNT = "open_rack_glass_glass"
+
+# HRRR stores 2 m temperature in Kelvin. pvlib's thermal model wants
+# Celsius, and nothing downstream can catch the confusion: a cell at
+# 300 instead of 27 still multiplies cleanly, and only the power comes
+# out wrong.
+KELVIN_ZERO = 273.15
 
 
 def position(hours: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
@@ -241,6 +258,51 @@ def poa(oriented: pd.DataFrame) -> pd.DataFrame:
 
     out = oriented.copy()
     out["poa"] = total.where(lit, 0.0).fillna(0.0)
+    return out
+
+
+def heat(irradiated: pd.DataFrame) -> pd.DataFrame:
+    """How hot the cells run, in degrees Celsius.
+
+    irradiated is `poa`'s output, carrying the light on the glass
+    alongside HRRR's t2m and w10m. Returns it with `cell_temperature`
+    added.
+
+    A hot cell makes less power — roughly 0.35% less for every degree
+    above 25 C — and a panel in full sun sits 25 to 35 degrees above the
+    air around it. Air temperature alone would therefore overstate a
+    desert afternoon by ten percent or more, and the afternoon is where
+    the peak the grid cares about is set.
+
+    The Sandia model, chosen for where it measures the wind. It heats
+    the module by the light it absorbs, cools it by a factor that decays
+    with wind speed, then adds a small step for the gap between the
+    module back and the cell inside. pvlib's other thermal models
+    (faiman, pvsyst_cell) want the wind at module height, near 2 m. This
+    one wants it at 10 m, which is exactly what HRRR stores. The others
+    would first need our wind pushed down a log profile, and that
+    correction is a guess this does not have to make.
+
+    No horizon rule is necessary. `poa` is already zero after dark, and
+    with no light the model returns the air temperature, which is what
+    an unlit panel really sits at. There is no division and no exponent
+    that can run away, so a NaN cannot start here either.
+
+    Thermal mass is ignored. A panel settles to a new temperature in 10
+    to 20 minutes and these rows stand an hour apart, so the steady
+    state answer is the right one at this resolution.
+    """
+    coefficients = pvlib.temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"][THERMAL_MOUNT]
+    air_celsius = irradiated["t2m"] - KELVIN_ZERO
+    cell = pvlib.temperature.sapm_cell(
+        poa_global=irradiated["poa"].to_numpy(),
+        temp_air=air_celsius.to_numpy(),
+        wind_speed=irradiated["w10m"].to_numpy(),
+        **coefficients,
+    )
+
+    out = irradiated.copy()
+    out["cell_temperature"] = cell
     return out
 
 
