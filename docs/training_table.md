@@ -98,22 +98,71 @@ alone deliberately. Fitting it against the whole record would put test
 period information into a training-time constant, which is the leak
 Gate 5 exists to avoid. Fit it on 2023–2024 only, if at all.
 
-## Two things the ceiling is not
+## The ceiling sits under the real sky, and by how much
 
-`clear_mw` is a **reference** clear sky, not a hard bound. The Linke
-turbidity table is a monthly climatology, so a genuinely clean day
-beats it: on 2024-06-15 CAISO reported 17,502 MW at midday against a
-17,043 MW ceiling. Nothing downstream may assume a clearness index of
-1 or less.
+`clear_mw` is a **reference** clear sky, not a hard bound — and the gap
+is bigger than a footnote. The physical estimate exceeds its own
+ceiling on **71.3% of daylight rows**, median ratio 1.059.
 
-Altitude is not the explanation. The registry carries no elevation, so
-the ceiling assumes sea level, but raising that to 800 m lifts the
-statewide ceiling by only **2.0%** — measured, not guessed. The
-remaining gap is the turbidity climatology.
+| Local hour | 5 | 7 | 10-15 | 17 | 19 |
+|---|---|---|---|---|---|
+| median estimate / ceiling | 1.88 | 1.13 | ~1.05 | 1.11 | 1.42 |
 
-No cap is applied to the ratio, because the persistence baseline
-divides by the ceiling and then multiplies by it again, so a steady
-bias cancels. A cap would not have that property.
+Two different faults wear one number:
+
+- **Midday, a steady +4.6 to +6.5%.** On a clear June day HRRR's GHI
+  runs ~10% above Ineichen's at every hour from 09:00 to 16:00.
+- **The shoulders, where the ratio breaks.** At a zenith near 86°,
+  Ineichen attenuates the beam far harder than HRRR: 75 W/m² of DNI
+  against HRRR's 102 at dawn, 66 against 223 at dusk. The megawatts
+  there are small — hours 5 and 19 carry 0.1% and 1.9% of total error
+  — so this is a broken ratio, not a broken forecast.
+
+**Altitude is not the cause.** The first test measured it at the noon
+peak, which is the one hour where airmass matters least. Re-tested
+across the day: at 800 m the dawn ratio gets *worse*, 2.54 → 2.93. The
+suspect is the Linke turbidity climatology, which reads high over clean
+dry air.
+
+What this costs: the clearness index is unusable as a diagnostic (it
+exceeds 1 most of the time), and `clear_mw`'s shape is distorted at
+dawn and dusk. What it does not cost: the persistence baseline, which
+divides by the ceiling and multiplies by it again, so a steady bias
+cancels. No cap is applied, because a cap would not have that property.
+
+## Why the error is 1141 MW, and what it is made of
+
+11.3% of mean daylight generation, 5.3% of installed capacity. Almost
+none of it is fixable by calibration — removing the flat bias takes it
+to 1103 MW, and a single scale factor makes it *worse* at 1175 MW.
+
+The reason is that the residual is two large effects of opposite sign
+plus cloud noise. Restricted to clear midday hours, where the physics
+should be at its best, the bias by month is:
+
+| Month | Jan | Feb | **Mar** | Apr | May | Jun | Jul | Aug | Sep | Oct |
+|---|---|---|---|---|---|---|---|---|---|---|
+| bias | +8% | +6% | **+32%** | +13% | +7% | −2% | −4% | −6% | −8% | −6% |
+
+- **Spring over-prediction is curtailment.** March reads +32% — 3762 MW
+  on clear midday hours. High output, mild demand and hydro running is
+  exactly when CAISO curtails solar hardest. Curtailed generation is
+  real sunlight that never reaches the fuel mix, and no irradiance
+  model can see an economic decision.
+- **Summer under-prediction is missing capacity.** June to December run
+  −2 to −8%. The registry is state-filtered, so the ~2.5 GW of Arizona
+  and Nevada solar inside CAISO's balancing authority is absent (see
+  `plant_registry.md`). With curtailment low in summer, that gap shows.
+- **Clouds are the smallest term.** Bucketing midday hours by HRRR's own
+  cloud cover: clear 8.0% error, few 10%, scattered 12%, broken 14%,
+  overcast 16%. Going from a clear sky to a broken one adds ~270 MW.
+
+This is good news for Gate 5. Both large terms are **learnable from
+features the table already carries** — curtailment from month, hour and
+output level, missing capacity from a scale the model can fit — while
+cloud error is the part no model can remove. A tree should beat 1141 MW
+by a wide margin, and doing so is mostly a matter of learning
+California's grid economics rather than its weather.
 
 ## What is not in the table, and why
 

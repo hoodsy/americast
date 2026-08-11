@@ -481,16 +481,32 @@ def clear(oriented: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     returns NaN, and a NaN ceiling would divide into a NaN clearness
     index for a whole plant-day.
 
-    **This is a reference clear sky, not a hard ceiling.** The
-    turbidity table gives a monthly climatology, so a genuinely clean
-    day beats it. Measured on the clear day 2024-06-15: CAISO reported
-    17,502 MW at midday and this returns 17,043 MW, 2.6% under what
-    actually happened. Altitude is not the explanation — 800 m would
-    add only 2.0%. Nothing downstream may assume a clearness index of
-    one or less. The persistence baseline is unharmed, because it
-    divides by this number and then multiplies by it again, so a steady
-    bias cancels; a hard cap on the ratio would not have that property
-    and is deliberately absent.
+    **This is a reference clear sky, and it sits well under a real
+    one.** Measured across the built table, the physical estimate beats
+    this ceiling on **71.3% of daylight rows**, median ratio 1.059.
+    The gap has two different shapes:
+
+    - Midday, a steady +4.6 to +6.5%. On a clear June day HRRR's GHI
+      runs about 10% above this model's at every hour from 09:00 to
+      16:00 local.
+    - The shoulders, where it becomes enormous: the median ratio is
+      1.88 at 05:00 local and 1.42 at 19:00. At a zenith near 86
+      degrees Ineichen attenuates the beam far harder than HRRR does —
+      75 W/m² of DNI against HRRR's 102 at dawn, 66 against 223 at
+      dusk. Both numbers are small, so those hours carry 0.1% and 1.9%
+      of the table's total error, but the ratio is unusable there.
+
+    Altitude is not the cause and was re-tested at the hours where it
+    should have mattered most. At 800 m the dawn ratio gets *worse*,
+    2.54 to 2.93. The suspect is the Linke turbidity climatology, which
+    is known to read high over clean dry air.
+
+    Nothing downstream may assume a clearness index of one or less. The
+    persistence baseline is unharmed, because it divides by this number
+    and multiplies by it again, so a steady bias cancels; a hard cap on
+    the ratio would not have that property and is deliberately absent.
+    What is harmed is the clearness index as a diagnostic, and the
+    shape of `clear_mw` as a model feature at dawn and dusk.
     """
     # The merge hands back a fresh RangeIndex, so `rows` and `oriented`
     # only line up positionally. Every value below is put back through
