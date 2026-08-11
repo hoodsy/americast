@@ -7,8 +7,9 @@ what a map needs, and they come free once the per-plant number exists.
 
 The chain is: where is the sun (`position`), where the panels point
 (`orient`), how much light reaches the panel plane (`poa`), how hot
-the cells get (`heat`), and what the inverter lets through. Each step
-takes the step before it and adds its columns.
+the cells get (`heat`), what the panels make (`generate`), and what
+the inverter lets through. Each step takes the step before it and adds
+its columns.
 """
 
 import numpy as np
@@ -98,6 +99,14 @@ THERMAL_MOUNT = "open_rack_glass_glass"
 # 300 instead of 27 still multiplies cleanly, and only the power comes
 # out wrong.
 KELVIN_ZERO = 273.15
+
+# The power a cell loses for each degree above 25 C. EIA reports no
+# module type, so this is a fleet constant like the two above. Modern
+# mono-PERC datasheets cluster at 0.34 to 0.37% per degree, and this
+# fleet was built mostly after 2015. PVWatts' own "standard" default of
+# 0.47% describes the older polycrystalline modules that California's
+# utility-scale fleet largely is not.
+GAMMA_PDC = -0.0035
 
 
 def position(hours: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
@@ -303,6 +312,66 @@ def heat(irradiated: pd.DataFrame) -> pd.DataFrame:
 
     out = irradiated.copy()
     out["cell_temperature"] = cell
+    return out
+
+
+def generate(heated: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
+    """DC megawatts at the panels, before any inverter sees them.
+
+    heated is `heat`'s output, carrying the light on the glass and the
+    cell temperature. plants supplies dc_capacity_mw and
+    operating_date. Returns heated with `dc_mw` added.
+
+    The PVWatts model, which is three numbers multiplied: the plant's
+    DC nameplate, the fraction of standard light that arrives, and a
+    correction for a cell that is not at 25 C.
+
+        dc = dc_capacity_mw * (poa / 1000) * (1 + GAMMA_PDC * (cell - 25))
+
+    It is the right model because of what EIA gives us. A single-diode
+    model is more accurate, but it wants cells in series, saturation
+    currents and a module part number, and EIA reports none of them.
+    What EIA does report is the DC nameplate, which is the plant's
+    output under exactly the conditions this equation references —
+    1000 W/m² on the panel and a 25 C cell. Feed those two numbers in
+    and the answer is the nameplate itself, by construction.
+
+    This deliberately returns more than the plant can deliver. The
+    fleet holds 30.4 GW of panel behind 23.9 GW of inverter, a loading
+    ratio of 1.275, so a clear midday drives DC well past what the grid
+    ever sees. Cutting it back is the inverter's job and belongs to the
+    next step, not this one — the size of that gap is the whole reason
+    the registry's DC column was worth chasing.
+
+    **A plant that does not exist yet makes nothing.** The registry is
+    one 2025 snapshot, but the weather store reaches back to 2023, so
+    every row asks about plants at 2025 sizes. Only 70.4% of today's
+    capacity was running on 2023-01-01. Without the operating_date
+    test, a 2023 January hour would collect power from panels that were
+    still fields, and the model would learn that 2023 was sunnier than
+    it was. This is the exact place to stop it, because it is the first
+    step where capacity enters the arithmetic — and every later sum,
+    including the clear-sky ceiling, inherits the correction for free.
+
+    Two known omissions, both steady and both small. Light that
+    reflects off the glass at a sharp angle is not removed here, and
+    soiling, wiring and mismatch losses are not either. They belong
+    with the inverter's own efficiency in the next step, where one
+    loss factor can carry them together.
+    """
+    columns = ["plant_id", "dc_capacity_mw", "operating_date"]
+    rows = heated.merge(plants[columns], on="plant_id", how="left")
+    watts = pvlib.pvsystem.pvwatts_dc(
+        effective_irradiance=rows["poa"].to_numpy(),
+        temp_cell=rows["cell_temperature"].to_numpy(),
+        pdc0=rows["dc_capacity_mw"].to_numpy(),
+        gamma_pdc=GAMMA_PDC,
+    )
+    built = rows["valid_time"] >= rows["operating_date"]
+    produced = pd.Series(watts, index=rows.index)
+
+    out = rows.drop(columns=columns[1:])
+    out["dc_mw"] = produced.where(built, 0.0)
     return out
 
 

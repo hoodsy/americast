@@ -3,9 +3,11 @@ import pandas as pd
 import pytest
 
 from americast.features.power import (
+    GAMMA_PDC,
     HORIZON_ZENITH,
     KELVIN_ZERO,
     MAX_ROTATION,
+    generate,
     heat,
     orient,
     poa,
@@ -136,7 +138,14 @@ def test_matches_pvlib_directly() -> None:
 # --- orient ---------------------------------------------------------
 
 
-def mounted(tracking: str, tilt: float = 0.0, azimuth: float = 180.0) -> pd.DataFrame:
+def mounted(
+    tracking: str,
+    tilt: float = 0.0,
+    azimuth: float = 180.0,
+    dc_capacity_mw: float = 127.5,
+    capacity_mw_ac: float = 100.0,
+    operating_date: str = "2020-01-01",
+) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "plant_id": [1],
@@ -145,6 +154,9 @@ def mounted(tracking: str, tilt: float = 0.0, azimuth: float = 180.0) -> pd.Data
             "tracking": [tracking],
             "tilt": [tilt],
             "azimuth": [azimuth],
+            "dc_capacity_mw": [dc_capacity_mw],
+            "capacity_mw_ac": [capacity_mw_ac],
+            "operating_date": [pd.Timestamp(operating_date, tz="UTC")],
         }
     )
 
@@ -402,3 +414,103 @@ def test_every_row_keeps_its_own_weather() -> None:
         "the dark row must not collect the lit row's sun"
     )
     assert out["cell_temperature"].iloc[1] > 280.0 - KELVIN_ZERO + 15.0
+
+
+# --- generate -------------------------------------------------------
+
+
+def generated(
+    poa_wm2, cell_c, times=("2024-06-21 20:00",), plant_ids=(1,), **kw
+) -> pd.DataFrame:
+    rig = mounted("single_axis", **kw)
+    frame = hours(list(times), plant_ids=plant_ids)
+    frame["poa"], frame["cell_temperature"] = poa_wm2, cell_c
+    return generate(frame, rig)
+
+
+def test_standard_conditions_give_the_nameplate() -> None:
+    """1000 W/m² on a 25 C cell is what the DC nameplate means."""
+    out = generated(1000.0, 25.0, dc_capacity_mw=127.5)
+    assert out["dc_mw"].iloc[0] == pytest.approx(127.5)
+
+
+def test_dc_scales_with_the_light() -> None:
+    half = generated(500.0, 25.0, dc_capacity_mw=100.0)["dc_mw"].iloc[0]
+    full = generated(1000.0, 25.0, dc_capacity_mw=100.0)["dc_mw"].iloc[0]
+    assert half == pytest.approx(full / 2.0)
+
+
+def test_a_hot_cell_makes_less_power() -> None:
+    cool = generated(1000.0, 25.0, dc_capacity_mw=100.0)["dc_mw"].iloc[0]
+    hot = generated(1000.0, 65.0, dc_capacity_mw=100.0)["dc_mw"].iloc[0]
+    assert hot < cool
+    assert hot == pytest.approx(cool * (1 + GAMMA_PDC * 40.0)), "0.35% per degree"
+
+
+def test_dark_panels_make_nothing() -> None:
+    out = generated(0.0, 20.0)
+    assert out["dc_mw"].iloc[0] == 0.0
+
+
+def test_dc_is_allowed_past_the_ac_nameplate() -> None:
+    """Clipping belongs to the inverter step; this one must not do it."""
+    out = generated(1000.0, 25.0, dc_capacity_mw=127.5, capacity_mw_ac=100.0)
+    assert out["dc_mw"].iloc[0] > 100.0, "the loading ratio must survive to here"
+
+
+def test_a_plant_makes_nothing_before_it_is_built() -> None:
+    """The registry is a 2025 snapshot; the weather store starts in 2023."""
+    out = generated(
+        1000.0,
+        25.0,
+        times=("2023-01-15 20:00",),
+        operating_date="2024-06-01",
+    )
+    assert out["dc_mw"].iloc[0] == 0.0, "these panels were still a field"
+
+
+def test_a_plant_generates_from_its_operating_month() -> None:
+    out = generated(
+        1000.0,
+        25.0,
+        times=("2024-06-01 20:00", "2024-05-31 20:00"),
+        operating_date="2024-06-01",
+    )
+    assert out["dc_mw"].iloc[0] > 0.0, "the first day counts"
+    assert out["dc_mw"].iloc[1] == 0.0, "the day before does not"
+
+
+def test_every_plant_uses_its_own_capacity_and_start() -> None:
+    """A merge that lined up wrongly would be invisible in a one-plant test."""
+    rig = pd.DataFrame(
+        {
+            "plant_id": [1, 2, 3],
+            "dc_capacity_mw": [100.0, 250.0, 40.0],
+            "operating_date": pd.to_datetime(
+                ["2020-01-01", "2025-01-01", "2020-01-01"], utc=True
+            ),
+        }
+    )
+    frame = hours(["2024-06-21 20:00"], plant_ids=(1, 2, 3))
+    frame["poa"], frame["cell_temperature"] = 1000.0, 25.0
+    out = generate(frame, rig).set_index("plant_id")
+    assert out.loc[1, "dc_mw"] == pytest.approx(100.0)
+    assert out.loc[2, "dc_mw"] == 0.0, "not built until 2025"
+    assert out.loc[3, "dc_mw"] == pytest.approx(40.0)
+
+
+def test_the_whole_chain_runs_end_to_end() -> None:
+    """position -> orient -> poa -> heat -> generate, on a full day."""
+    day = pd.date_range("2024-06-21", periods=24, freq="1h", tz="UTC")
+    rig = mounted("single_axis", dc_capacity_mw=100.0)
+    frame = position(hours([str(t) for t in day]), rig)
+    frame["dni"] = 900.0 * frame["cos_zenith"]
+    frame["dhi"] = 100.0 * frame["cos_zenith"]
+    frame["dswrf"] = 850.0 * frame["cos_zenith"]
+    frame["t2m"], frame["w10m"] = 303.15, 3.0
+    out = generate(heat(poa(orient(frame, rig))), rig)
+
+    assert out["dc_mw"].notna().all()
+    assert (out["dc_mw"] >= 0.0).all(), "no plant generates in the dark"
+    assert out["dc_mw"].max() > 60.0, "a June day should work the panels hard"
+    assert out["dc_mw"].max() < 100.0, "and never beat the nameplate on this sky"
