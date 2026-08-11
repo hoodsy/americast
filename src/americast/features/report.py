@@ -1,8 +1,23 @@
 """Gate 4 EDA: does the table describe the days it claims to describe?
 
-Reads the training table and writes one self-contained HTML page. No
-notebook, so the figures are reproducible from a command and reviewable
-in a diff.
+Reads the training table and writes one HTML page. No notebook, so the
+figures are reproducible from a command and reviewable in a diff.
+
+Open it with `open data/reports/gate4.html`. Plotly itself comes from a
+CDN rather than being inlined, which keeps the file at tens of
+kilobytes instead of megabytes but means the page needs a network on
+first view.
+
+`write` takes any slice of the table, so a report for one month is a
+filter away:
+
+    from americast.features import report
+    from americast.features.table import load
+
+    table = load()
+    runs = table["run_time"]
+    june = table[(runs.dt.year == 2024) & (runs.dt.month == 6)]
+    report.write(june, Path("data/reports/pilot_2024_06.html"))
 
 The page answers three questions. How close is the physical model to
 CAISO, before any learning at all? Do the two baselines beat a naive
