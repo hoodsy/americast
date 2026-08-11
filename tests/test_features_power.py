@@ -5,10 +5,15 @@ import pytest
 from americast.features.power import (
     GAMMA_PDC,
     HORIZON_ZENITH,
+    INVERTER_EFFICIENCY,
     KELVIN_ZERO,
     MAX_ROTATION,
+    SYSTEM_LOSSES,
+    clear,
+    estimate,
     generate,
     heat,
+    invert,
     orient,
     poa,
     position,
@@ -514,3 +519,180 @@ def test_the_whole_chain_runs_end_to_end() -> None:
     assert (out["dc_mw"] >= 0.0).all(), "no plant generates in the dark"
     assert out["dc_mw"].max() > 60.0, "a June day should work the panels hard"
     assert out["dc_mw"].max() < 100.0, "and never beat the nameplate on this sky"
+
+
+# --- invert ---------------------------------------------------------
+
+
+def inverted(dc_mw, times=("2024-06-21 20:00",), plant_ids=(1,), **kw) -> pd.DataFrame:
+    rig = mounted("single_axis", **kw)
+    frame = hours(list(times), plant_ids=plant_ids)
+    frame["dc_mw"] = dc_mw
+    return invert(frame, rig)
+
+
+def test_ac_never_passes_the_nameplate() -> None:
+    """The inverter is a wall, and a clear midday runs straight into it."""
+    out = inverted(1000.0, capacity_mw_ac=100.0)
+    assert out["ac_mw"].iloc[0] == pytest.approx(100.0)
+
+
+def test_clipping_flattens_the_top_of_the_curve() -> None:
+    """Two very different skies, one identical meter reading."""
+    out = inverted([300.0, 600.0], times=("2024-06-21 20:00", "2024-06-21 21:00"))
+    assert out["ac_mw"].iloc[0] == pytest.approx(out["ac_mw"].iloc[1])
+    assert out["ac_mw"].iloc[0] == pytest.approx(100.0)
+
+
+def test_losses_come_off_before_the_clip() -> None:
+    """Below the limit, AC is DC less losses and inverter efficiency.
+
+    The efficiency curve peaks near half load, slightly above the
+    nominal figure, so this asserts nearness rather than a direction.
+    """
+    out = inverted(50.0, capacity_mw_ac=100.0)
+    nominal = 50.0 * SYSTEM_LOSSES * INVERTER_EFFICIENCY
+    assert out["ac_mw"].iloc[0] == pytest.approx(nominal, rel=0.01)
+
+
+def test_dark_panels_meter_nothing() -> None:
+    """pvlib divides by the load ratio; zero DC must not become NaN."""
+    out = inverted(0.0)
+    assert out["ac_mw"].iloc[0] == 0.0
+
+
+def test_a_low_load_inverter_is_less_efficient() -> None:
+    tiny = inverted(1.0, capacity_mw_ac=100.0)["ac_mw"].iloc[0]
+    busy = inverted(60.0, capacity_mw_ac=100.0)["ac_mw"].iloc[0]
+    assert tiny / (1.0 * SYSTEM_LOSSES) < busy / (60.0 * SYSTEM_LOSSES)
+
+
+def test_every_plant_clips_at_its_own_limit() -> None:
+    rig = pd.DataFrame({"plant_id": [1, 2], "capacity_mw_ac": [100.0, 20.0]})
+    frame = hours(["2024-06-21 20:00"], plant_ids=(1, 2))
+    frame["dc_mw"] = 1000.0
+    out = invert(frame, rig).set_index("plant_id")
+    assert out.loc[1, "ac_mw"] == pytest.approx(100.0)
+    assert out.loc[2, "ac_mw"] == pytest.approx(20.0)
+
+
+# --- clear ----------------------------------------------------------
+
+
+def cleared(times: list[str], tracking: str = "single_axis", **kw) -> pd.DataFrame:
+    rig = mounted(tracking, **kw)
+    frame = position(hours(times), rig)
+    frame["dni"], frame["dhi"], frame["dswrf"] = 0.0, 0.0, 0.0
+    return clear(orient(frame, rig), rig)
+
+
+def test_a_clear_sky_is_bright_at_noon() -> None:
+    out = cleared(["2024-06-21 20:00"])
+    assert 900.0 < out["dswrf"].iloc[0] < 1100.0, "midsummer noon, clear"
+    assert out["dni"].iloc[0] > 800.0
+    assert out["dhi"].iloc[0] > 0.0, "even a clear sky scatters some light"
+
+
+def test_a_clear_sky_is_dark_at_night() -> None:
+    """The airmass formula returns NaN above the horizon."""
+    out = cleared(["2024-06-21 08:00"])
+    assert out["dswrf"].iloc[0] == 0.0
+    assert out["dni"].iloc[0] == 0.0
+    assert out["dhi"].iloc[0] == 0.0
+
+
+def test_the_clear_sky_identity_holds() -> None:
+    """ghi = dni * cos(zenith) + dhi, the same identity HRRR obeys."""
+    out = cleared(["2024-06-21 17:00", "2024-06-21 20:00", "2024-06-21 23:00"])
+    rebuilt = out["dni"] * out["cos_zenith"] + out["dhi"]
+    assert rebuilt.to_numpy() == pytest.approx(out["dswrf"].to_numpy(), rel=1e-6)
+
+
+def test_the_ceiling_never_dips_below_a_real_sky() -> None:
+    """A clear sky is the most light this hour could possibly deliver."""
+    day = pd.date_range("2024-06-21", periods=24, freq="1h", tz="UTC")
+    ceiling = cleared([str(t) for t in day])
+    assert (ceiling["dswrf"] >= 0.0).all()
+    assert ceiling["dswrf"].max() < 1200.0, "and not more than physics allows"
+
+
+def test_turbidity_follows_the_place() -> None:
+    """Coastal air is cleaner than desert air, and it must show."""
+    coastal = mounted("fixed")
+    coastal["latitude"], coastal["longitude"] = 35.4, -120.6
+    desert = mounted("fixed")
+    desert["latitude"], desert["longitude"] = 34.8, -115.5
+
+    skies = []
+    for rig in (coastal, desert):
+        frame = position(hours(["2024-07-15 20:00"]), rig)
+        frame["dni"], frame["dhi"], frame["dswrf"] = 0.0, 0.0, 0.0
+        skies.append(clear(orient(frame, rig), rig)["dni"].iloc[0])
+    assert skies[0] != skies[1], "one turbidity for the whole fleet would tie them"
+
+
+# --- estimate -------------------------------------------------------
+
+
+def day_sky(rig: pd.DataFrame, fraction: float = 1.0) -> pd.DataFrame:
+    """A day-shaped sky: the beam fades as the sun nears the horizon."""
+    day = pd.date_range("2024-06-21", periods=24, freq="1h", tz="UTC")
+    frame = position(hours([str(t) for t in day]), rig)
+    frame["dni"] = 900.0 * fraction * frame["cos_zenith"]
+    frame["dhi"] = 100.0 * fraction * frame["cos_zenith"]
+    frame["dswrf"] = 850.0 * fraction * frame["cos_zenith"]
+    frame["t2m"], frame["w10m"] = 303.15, 3.0
+    return frame.drop(columns=["zenith", "solar_azimuth", "cos_zenith"])
+
+
+def test_estimate_runs_both_skies() -> None:
+    rig = mounted("single_axis", dc_capacity_mw=127.5, capacity_mw_ac=100.0)
+    out = estimate(day_sky(rig, fraction=0.4), rig)
+
+    assert {"ac_mw", "clear_mw"} <= set(out.columns)
+    assert out["ac_mw"].notna().all() and out["clear_mw"].notna().all()
+    assert (out["clear_mw"] >= out["ac_mw"]).all(), "a dim sky cannot beat a clear one"
+    assert (out["clear_mw"] <= 100.0 + 1e-9).all(), "the ceiling clips too"
+
+
+def test_a_loading_ratio_of_1_275_clips_only_when_it_is_cool() -> None:
+    """Why the temperature step had to come before this one.
+
+    1.275 of panel behind the inverter sounds like guaranteed clipping,
+    but 14% system losses spend most of the margin and hot cells spend
+    the rest. The wall is real; a June afternoon just never reaches it.
+    """
+    rig = mounted("single_axis", dc_capacity_mw=127.5, capacity_mw_ac=100.0)
+    hot, cool = day_sky(rig), day_sky(rig)
+    hot["t2m"], cool["t2m"] = 303.15, 278.15
+
+    assert estimate(hot, rig)["clear_mw"].max() < 95.0, "30 C leaves headroom"
+    assert estimate(cool, rig)["clear_mw"].max() == pytest.approx(100.0), "5 C clips"
+
+
+def test_both_skies_are_dark_at_the_same_hours() -> None:
+    """A ceiling of zero under a lit forecast would divide into infinity."""
+    rig = mounted("single_axis")
+    out = estimate(day_sky(rig), rig)
+    dark = out[out["clear_mw"] == 0.0]
+    assert len(dark) > 0, "a June day still has a night"
+    assert (dark["ac_mw"] == 0.0).all()
+
+
+def test_a_bright_sky_reads_as_bright() -> None:
+    rig = mounted("single_axis")
+    out = estimate(day_sky(rig), rig)
+    lit = out[out["clear_mw"] > 0.0]
+    assert (lit["ac_mw"] / lit["clear_mw"]).max() > 0.8
+
+
+def test_the_ceiling_ignores_the_clouds_but_keeps_the_air() -> None:
+    """Only the light is idealised. A hot day has a lower ceiling."""
+    rig = mounted("single_axis")
+    cool = day_sky(rig)
+    hot = cool.copy()
+    hot["t2m"] = cool["t2m"] + 20.0
+
+    noon = estimate(cool, rig)["clear_mw"].max()
+    baked = estimate(hot, rig)["clear_mw"].max()
+    assert baked < noon, "the same clear sky over hotter air makes less power"

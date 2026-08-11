@@ -8,9 +8,17 @@ what a map needs, and they come free once the per-plant number exists.
 The chain is: where is the sun (`position`), where the panels point
 (`orient`), how much light reaches the panel plane (`poa`), how hot
 the cells get (`heat`), what the panels make (`generate`), and what
-the inverter lets through. Each step takes the step before it and adds
-its columns.
+the inverter lets through (`invert`). Each step takes the step before
+it and adds its columns.
+
+`estimate` runs the chain twice — once on HRRR's sky and once on a
+clear one from `clear` — because the ratio of the two is the clearness
+index, and the clear-sky number is the ceiling the persistence
+baseline needs.
 """
+
+import warnings
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -107,6 +115,29 @@ KELVIN_ZERO = 273.15
 # 0.47% describes the older polycrystalline modules that California's
 # utility-scale fleet largely is not.
 GAMMA_PDC = -0.0035
+
+# Everything between the panel nameplate and the inverter input that
+# this chain does not model one at a time: soiling, module mismatch, DC
+# wiring, connections, light-induced degradation, nameplate tolerance
+# and plant availability. PVWatts bundles them at 14%, fitted
+# nationally, and EIA reports no per-plant figure for any of them.
+# Expect this to be the first constant recalibrated once Gate 5 grades
+# the model against CAISO.
+SYSTEM_LOSSES = 0.86
+
+# Inverter efficiency at its nominal operating point. pvlib bends a
+# curve around it, and the curve matters: efficiency sags at low load,
+# so a flat 96% would overstate the first and last hours of the day.
+INVERTER_EFFICIENCY = 0.96
+
+# Height above sea level assumed for the clear-sky ceiling. The
+# registry carries no elevation, and California's plants sit between
+# roughly 100 and 1200 m. Measured on 2024-06-15, raising this from 0
+# to 800 m lifts the statewide ceiling by only 2.0%, so it is not the
+# reason the ceiling sits below a clear day's real output; see
+# `clear`. Left at 0 because every other value is a guess and the
+# measurement says the guess would buy almost nothing.
+CLEAR_SKY_ALTITUDE = 0.0
 
 
 def position(hours: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
@@ -373,6 +404,199 @@ def generate(heated: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     out = rows.drop(columns=columns[1:])
     out["dc_mw"] = produced.where(built, 0.0)
     return out
+
+
+def invert(generated: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
+    """AC megawatts at the meter — the number the grid actually sees.
+
+    generated is `generate`'s output; plants supplies capacity_mw_ac.
+    Returns generated with `ac_mw` added.
+
+    Two things happen between the panels and the meter, in this order.
+
+    First the losses. SYSTEM_LOSSES takes 14% off the DC, standing in
+    for soiling, mismatch, wiring, degradation and availability — real
+    effects that EIA reports no number for. It has to come off before
+    the clip, not after, because a dirtier array clips less often.
+
+    Then the inverter, with its input limit set so that its output
+    limit is exactly the plant's AC nameplate. This is where the
+    loading ratio finally pays: the fleet carries 30.45 GW of panel
+    behind 23.88 GW of inverter, so on a clear midday the top of the
+    curve is sliced flat. That flat top is not a modelling artefact. It
+    is the single most distinctive shape in a modern solar fleet's
+    output, and a model that never saw it would keep forecasting peaks
+    that the hardware cannot deliver.
+
+    pvlib bends an efficiency curve around INVERTER_EFFICIENCY rather
+    than applying it flat, because an inverter running at 5% of its
+    rating is meaningfully worse than one running at 60%. That is the
+    difference between the two ends of the day and the middle.
+
+    Clipping makes this step deliberately lossy in a way the others are
+    not: past the limit, extra light changes nothing. Any feature built
+    downstream from `ac_mw` alone therefore cannot see how sunny a
+    clipped hour was, which is why `clear_mw` from `estimate` is kept
+    beside it.
+    """
+    columns = ["plant_id", "capacity_mw_ac"]
+    rows = generated.merge(plants[columns], on="plant_id", how="left")
+    delivered = rows["dc_mw"] * SYSTEM_LOSSES
+    inverter_limit = rows["capacity_mw_ac"] / INVERTER_EFFICIENCY
+    metered = pvlib.inverter.pvwatts(
+        delivered.to_numpy(),
+        inverter_limit.to_numpy(),
+        eta_inv_nom=INVERTER_EFFICIENCY,
+    )
+
+    out = rows.drop(columns=["capacity_mw_ac"])
+    out["ac_mw"] = metered
+    return out
+
+
+def clear(oriented: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
+    """The same hour, at the same place, with the clouds taken away.
+
+    oriented is `orient`'s output; plants supplies coordinates. Returns
+    a copy with dswrf, dni and dhi replaced by what a clear sky would
+    deliver, so that `poa`, `heat`, `generate` and `invert` can run on
+    it unchanged. That is the point of the design: one physics chain,
+    called twice, and the ratio of the two answers is the clearness of
+    the sky at any level we care to sum to.
+
+    The Ineichen model, with Linke turbidity looked up from the table
+    pvlib ships. Turbidity is how much haze and dust the air holds, and
+    it is not a constant across this fleet — the lookup returns 2.75
+    near the coast and 4.5 over the desert, which is several percent of
+    clear-sky irradiance. A single fleet number would flatten exactly
+    the geographic contrast Gate 4 exists to keep.
+
+    The air stays as HRRR forecast it. Only the light is idealised, so
+    the ceiling answers "what would these panels make in today's air,
+    under a clear sky" rather than inventing a different day. A cool
+    clear morning and a hot clear afternoon have genuinely different
+    ceilings, and the clearness ratio should not have to explain that.
+
+    Night is forced to zero. Above the horizon the airmass formula
+    returns NaN, and a NaN ceiling would divide into a NaN clearness
+    index for a whole plant-day.
+
+    **This is a reference clear sky, not a hard ceiling.** The
+    turbidity table gives a monthly climatology, so a genuinely clean
+    day beats it. Measured on the clear day 2024-06-15: CAISO reported
+    17,502 MW at midday and this returns 17,043 MW, 2.6% under what
+    actually happened. Altitude is not the explanation — 800 m would
+    add only 2.0%. Nothing downstream may assume a clearness index of
+    one or less. The persistence baseline is unharmed, because it
+    divides by this number and then multiplies by it again, so a steady
+    bias cancels; a hard cap on the ratio would not have that property
+    and is deliberately absent.
+    """
+    coords = plants[["plant_id", "latitude", "longitude"]]
+    rows = oriented.merge(coords, on="plant_id", how="left")
+    relative_airmass = pvlib.atmosphere.get_relative_airmass(rows["zenith"])
+    airmass = pvlib.atmosphere.get_absolute_airmass(relative_airmass)
+    extra = pvlib.irradiance.get_extra_radiation(pd.DatetimeIndex(rows["valid_time"]))
+
+    sky = _ineichen(
+        rows["zenith"].to_numpy(),
+        airmass.to_numpy(),
+        _turbidity(rows).to_numpy(),
+        np.asarray(extra),
+    )
+
+    lit = rows["cos_zenith"] > 0.0
+    out = oriented.copy()
+    for column, field in (("dswrf", "ghi"), ("dni", "dni"), ("dhi", "dhi")):
+        values = pd.Series(np.asarray(sky[field]), index=oriented.index)
+        out[column] = values.where(lit, 0.0).fillna(0.0)
+    return out
+
+
+def estimate(weather: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
+    """Every plant's AC megawatts, and its clear-sky ceiling, per hour.
+
+    weather is an HRRR_WEATHER frame; plants is the registry. Returns
+    one row per (forecast hour, plant) carrying `ac_mw` and `clear_mw`.
+
+    This is the whole chain, run twice over the same geometry. The sun
+    and the panel angles are computed once and shared, because they do
+    not depend on the weather; only the light differs between the two
+    passes.
+
+    `clear_mw` is not a second forecast. It is the denominator that
+    turns megawatts into a clearness index at any level — plant,
+    county, zone or state — and it is what the clear-sky persistence
+    baseline needs. Keeping it beside `ac_mw` is also what lets a
+    clipped hour stay legible: two hours can both sit flat at the
+    inverter limit while one had half the sky the other did.
+
+    Per-plant numbers are returned, never stored. They are cheap to
+    rebuild from the weather store and would double it if written.
+    """
+    positioned = position(weather, plants)
+    oriented = orient(positioned, plants)
+    forecast = invert(generate(heat(poa(oriented)), plants), plants)
+    ceiling = invert(generate(heat(poa(clear(oriented, plants))), plants), plants)
+
+    out = forecast
+    out["clear_mw"] = ceiling["ac_mw"].to_numpy()
+    return out
+
+
+def _ineichen(
+    zenith: np.ndarray,
+    airmass: np.ndarray,
+    turbidity: np.ndarray,
+    extra: np.ndarray,
+) -> dict:
+    """The Ineichen clear-sky model, quiet about the night rows.
+
+    Above the horizon the absolute airmass is NaN, and pvlib divides by
+    it, so every call that spans a night raises a divide-by-zero
+    RuntimeWarning. The night rows are zeroed by the caller anyway. A
+    training-table build would otherwise print the warning once per
+    run. The filter covers only this call.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return pvlib.clearsky.ineichen(
+            apparent_zenith=zenith,
+            airmass_absolute=airmass,
+            linke_turbidity=turbidity,
+            altitude=CLEAR_SKY_ALTITUDE,
+            dni_extra=extra,
+        )
+
+
+@lru_cache(maxsize=None)
+def _turbidity_at(latitude: float, longitude: float, month: int) -> float:
+    """Linke turbidity for one place in one month.
+
+    Cached because the lookup opens a 15.6 MB table on every call and
+    the answer depends only on where and when, not on the run. A
+    training-table build touches the same few hundred coordinates for
+    every one of hundreds of runs; without the cache that is hours.
+    """
+    when = pd.DatetimeIndex([pd.Timestamp(year=2024, month=month, day=15, tz="UTC")])
+    return float(
+        pvlib.clearsky.lookup_linke_turbidity(when, latitude, longitude).iloc[0]
+    )
+
+
+def _turbidity(rows: pd.DataFrame) -> pd.Series:
+    """Linke turbidity per row, one lookup per place and month."""
+    months = rows["valid_time"].dt.month
+    keys = pd.DataFrame(
+        {"latitude": rows["latitude"], "longitude": rows["longitude"], "month": months}
+    )
+    unique = keys.drop_duplicates()
+    unique["turbidity"] = [
+        _turbidity_at(row.latitude, row.longitude, row.month)
+        for row in unique.itertuples()
+    ]
+    merged = keys.merge(unique, on=["latitude", "longitude", "month"], how="left")
+    return pd.Series(merged["turbidity"].to_numpy(), index=rows.index)
 
 
 def _axis_tilt(tilt: pd.Series) -> pd.Series:
