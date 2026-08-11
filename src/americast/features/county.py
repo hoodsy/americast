@@ -60,3 +60,8 @@ COUNTY_ZONE = {}
 for _zone, _counties in ZONE_COUNTIES.items():
     for _county in _counties:
         COUNTY_ZONE[_county.lower()] = _zone
+
+# Sorted, because a pandas pivot emits its columns sorted and the
+# training table's declared schema has to predict that order exactly.
+# One tuple decides both, so they cannot drift apart.
+ZONES = tuple(sorted(ZONE_COUNTIES))

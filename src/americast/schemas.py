@@ -7,6 +7,8 @@ months later when something downstream reads it back.
 
 import pyarrow as pa
 
+from americast.features.county import ZONES
+
 # CAISO fuel-mix solar at the feed's native 5-minute resolution.
 # utc_time is the interval start. solar_mw is average power over the
 # interval; small negatives at night are real (station service draw).
@@ -85,5 +87,62 @@ PLANTS_CA = pa.schema(
         pa.field("county", pa.string(), nullable=False),
         pa.field("balancing_authority", pa.string(), nullable=False),
         pa.field("operating_date", pa.timestamp("us", tz="UTC"), nullable=False),
+    ]
+)
+
+# The model's training table: one row per (run_time, valid_time).
+#
+# Every value column describes the HOUR THAT STARTS at valid_time, not
+# the instant. HRRR reports instants, and the CAISO label is a mean
+# over the hour, so features/features.py averages each instant with the
+# next one before anything lands here. That single alignment cut the
+# physical estimate's error by 39% on the pilot day; see
+# docs/training_table.md.
+#
+# Weather columns are capacity-weighted means in native GRIB units, per
+# zone and across the fleet. ac_mw and clear_mw are sums of the
+# per-plant physical model — what the panels would make under HRRR's
+# sky and under a clear one. Their ratio is the clearness index, and
+# clear_mw is what the persistence baseline scales.
+#
+# solar_mw is the label: CAISO's reported utility-scale solar, averaged
+# over the hour. It is nullable because the weather store reaches hours
+# the label store has not yet covered, and n_intervals says how many
+# 5-minute readings stand behind it (12 = complete).
+#
+# The two baseline columns are stored beside the label, not computed at
+# evaluation time, so that the number the model is graded against is
+# fixed in the same artifact as the model's inputs. Both are null where
+# the run has no qualifying history behind it.
+_ZONE_WEATHER = [
+    pa.field(f"{zone}_{var}", pa.float64(), nullable=False)
+    for zone in ZONES
+    for var in ("dswrf", "tcdc", "t2m", "w10m")
+]
+_ZONE_POWER = [
+    pa.field(f"{zone}_{var}", pa.float64(), nullable=False)
+    for zone in ZONES
+    for var in ("ac_mw", "clear_mw")
+]
+TRAIN_TABLE = pa.schema(
+    [
+        pa.field("run_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("valid_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("lead_hours", pa.int32(), nullable=False),
+        *_ZONE_WEATHER,
+        *[
+            pa.field(f"fleet_{var}", pa.float64(), nullable=False)
+            for var in ("dswrf", "tcdc", "t2m", "w10m")
+        ],
+        *_ZONE_POWER,
+        pa.field("fleet_ac_mw", pa.float64(), nullable=False),
+        pa.field("fleet_clear_mw", pa.float64(), nullable=False),
+        pa.field("fleet_cos_zenith", pa.float64(), nullable=False),
+        pa.field("local_hour", pa.int32(), nullable=False),
+        pa.field("day_of_year", pa.int32(), nullable=False),
+        pa.field("solar_mw", pa.float64(), nullable=True),
+        pa.field("n_intervals", pa.int32(), nullable=True),
+        pa.field("baseline_clear_sky_mw", pa.float64(), nullable=True),
+        pa.field("baseline_smart_mw", pa.float64(), nullable=True),
     ]
 )

@@ -5,18 +5,37 @@ hour, but the weather store holds 788 plant rows for that same hour.
 This module does the collapse -- and it collapses inside weather zones
 rather than statewide, because fog in the Bay and clear sky in the
 Mojave average to "half cloudy", which describes neither place.
+
+Two kinds of column come out. `aggregate` gives capacity-weighted
+weather means, which is what the raw fields look like from a zone's
+point of view. `physical` runs every plant through features/power.py
+and sums the megawatts, which is what those fields mean. The model
+gets both, because the physics is a strong prior and the raw fields
+are where it can find what the physics missed.
+
+`hourly` then does something small and easy to overlook: it turns
+instants into hour means, so that a feature and its label describe the
+same span of time.
 """
 
 import pandas as pd
 
-from americast.features.county import CISO_BA, COUNTY_ZONE
+from americast.features.county import CISO_BA, COUNTY_ZONE, ZONES
+from americast.features.power import estimate
 
 # The four HRRR fields, in schema order. Native GRIB units throughout —
 # W/m², %, Kelvin, m/s — because a weighted mean is unit-agnostic.
 WEATHER_VARS = ("dswrf", "tcdc", "t2m", "w10m")
 
+# What the physical model contributes per zone and per fleet.
+POWER_VARS = ("ac_mw", "clear_mw")
+
 # What identifies one forecast hour, and so one row of the model's table.
 HOUR_KEYS = ["run_time", "valid_time"]
+
+# Columns that name an hour rather than measure it, so `hourly` must
+# leave them alone while it averages everything else.
+INDEX_COLUMNS = (*HOUR_KEYS, "lead_hours")
 
 
 def fleet(plants: pd.DataFrame) -> pd.DataFrame:
@@ -64,8 +83,7 @@ def aggregate(weather: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
         weighted[var] = rows[var] * rows["capacity_mw_ac"]
 
     by_zone = _means(weighted, [*HOUR_KEYS, "zone"])
-    spread = by_zone.pivot(index=HOUR_KEYS, columns="zone", values=list(WEATHER_VARS))
-    spread.columns = [f"{zone}_{var}" for var, zone in spread.columns]
+    spread = _spread(by_zone, WEATHER_VARS)
 
     by_fleet = _means(weighted, HOUR_KEYS)
     renamed = {var: f"fleet_{var}" for var in WEATHER_VARS}
@@ -74,6 +92,141 @@ def aggregate(weather: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     lead = out["valid_time"] - out["run_time"]
     out.insert(2, "lead_hours", (lead // pd.Timedelta(hours=1)).astype("int32"))
     return out.sort_values(HOUR_KEYS).reset_index(drop=True)
+
+
+def physical(weather: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
+    """Per-plant megawatts, summed to zone and fleet: the physics prior.
+
+    weather is the HRRR_WEATHER frame; plants is fleet()'s output.
+    Returns one row per (run_time, valid_time) carrying
+    `{zone}_ac_mw`, `{zone}_clear_mw`, the two fleet totals, and
+    `fleet_cos_zenith`.
+
+    The weather store holds all 928 registry plants and this models the
+    788 in CISO, so the filter happens here, before the physics runs.
+    It is done by selection rather than by a join, because
+    features/power.py raises on a plant it has no registry row for —
+    that check is worth keeping sharp, and it can only stay sharp if
+    the caller narrows the frame deliberately.
+
+    Summing is exact and needs no weights: a megawatt at one plant is a
+    megawatt at another. That is the whole advantage of modelling power
+    per plant rather than averaging weather and modelling once. Zones
+    that hold no plants yet still appear, as zeros, so the table keeps
+    one shape across the years.
+
+    `fleet_cos_zenith` is capacity-weighted, not summed. It carries the
+    plain geometry of the day, which a tree would otherwise have to
+    reconstruct from the calendar columns.
+    """
+    mine = weather[weather["plant_id"].isin(plants["plant_id"])]
+    estimated = estimate(mine, plants)
+    zoned = estimated.merge(
+        plants[["plant_id", "zone", "capacity_mw_ac"]], on="plant_id", how="left"
+    )
+
+    by_zone = zoned.groupby([*HOUR_KEYS, "zone"], as_index=False)[list(POWER_VARS)].sum()
+    spread = _spread(by_zone, POWER_VARS)
+
+    totals = zoned.groupby(HOUR_KEYS, as_index=False)[list(POWER_VARS)].sum()
+    renamed = {var: f"fleet_{var}" for var in POWER_VARS}
+
+    zoned["weighted_cos"] = zoned["cos_zenith"] * zoned["capacity_mw_ac"]
+    summed = zoned.groupby(HOUR_KEYS, as_index=False)[
+        ["weighted_cos", "capacity_mw_ac"]
+    ].sum()
+    summed["fleet_cos_zenith"] = summed["weighted_cos"] / summed["capacity_mw_ac"]
+
+    out = spread.reset_index().merge(totals.rename(columns=renamed), on=HOUR_KEYS)
+    out = out.merge(summed[[*HOUR_KEYS, "fleet_cos_zenith"]], on=HOUR_KEYS)
+    # A zone holding no plants yet is genuinely zero megawatts. The
+    # same is not true of `aggregate`, where an absent zone has no
+    # temperature and must stay null rather than be invented.
+    return out.fillna(0.0).sort_values(HOUR_KEYS).reset_index(drop=True)
+
+
+def hourly(frame: pd.DataFrame) -> pd.DataFrame:
+    """Instants at the hour mark -> means over the hour that follows.
+
+    frame is one row per (run_time, valid_time). Returns the same
+    shape, minus the last forecast hour of every run, with every value
+    column replaced by the average of itself and the next hour's value.
+
+    **This is the alignment the whole table depends on.** HRRR's
+    radiation fields are instantaneous readings at valid_time. CAISO's
+    hourly label is the mean over the hour that starts at valid_time.
+    Comparing one to the other is a like-for-like error that hides in
+    plain sight: it looks correct at midday, when the curve is flat,
+    and it is worst at sunrise and sunset, when the curve is steep and
+    the two quantities differ most.
+
+    Measured on 2024-06-15, statewide: the instant at 02:00 UTC reads
+    2.6 times CAISO's mean for that hour, and the instant at 13:00
+    reads a fifth of it. Averaging the two ends of each hour first cut
+    the whole day's mean error from 1264 MW to 775 MW, a 39% drop, with
+    no change to the physics at all.
+
+    A trapezoid, not something cleverer, because two points is all a
+    forecast hour gives us. It slightly overshoots a sunrise ramp,
+    which curves.
+
+    No future information enters. The next hour's value comes from the
+    same forecast run — it is something the model already knew at
+    run_time, not something the day revealed later.
+
+    The last forecast hour of each run has no successor and is dropped
+    rather than left as an instant. One hour in 48 is a cheap price for
+    a column that means exactly one thing everywhere.
+    """
+    values = [c for c in frame.columns if c not in INDEX_COLUMNS]
+    ordered = frame.sort_values(HOUR_KEYS)
+    by_run = ordered.groupby("run_time")
+
+    nxt = by_run[values].shift(-1)
+    averaged = ordered.copy()
+    averaged[values] = (ordered[values] + nxt) / 2.0
+
+    keep = by_run["valid_time"].transform("max") != ordered["valid_time"]
+    return averaged[keep].reset_index(drop=True)
+
+
+def calendar(frame: pd.DataFrame, timezone: str) -> pd.DataFrame:
+    """Local hour and day of year, the two things weather cannot say.
+
+    frame carries valid_time in UTC; timezone is the region's IANA key.
+    Returns frame with `local_hour` and `day_of_year` added.
+
+    Storage stays UTC and only this conversion is local, because the
+    things these columns stand for are local: when people are awake,
+    and where the sun sits in the year. A model given UTC hours has to
+    learn that the meaning of "hour 20" slides by one every March and
+    November.
+
+    Day of year is left as a plain number rather than split into a sine
+    and cosine pair. A tree splits on thresholds, so it can carve the
+    year into seasons on its own; the smooth encoding buys a linear
+    model something a tree does not need.
+    """
+    local = frame["valid_time"].dt.tz_convert(timezone)
+    out = frame.copy()
+    out["local_hour"] = local.dt.hour.astype("int32")
+    out["day_of_year"] = local.dt.dayofyear.astype("int32")
+    return out
+
+
+def _spread(long: pd.DataFrame, variables: tuple[str, ...]) -> pd.DataFrame:
+    """Long zone rows -> one `{zone}_{var}` column each, shape guaranteed.
+
+    Reindexed over ZONES rather than over whatever zones happened to
+    appear. A pivot invents its columns from the data, so a zone with
+    no plants would quietly vanish and the table would change width
+    between one year and the next. The declared schema is what catches
+    that, and it can only catch it if the column is present and null.
+    """
+    wide = long.pivot(index=HOUR_KEYS, columns="zone", values=list(variables))
+    wide.columns = [f"{zone}_{var}" for var, zone in wide.columns]
+    expected = [f"{zone}_{var}" for zone in ZONES for var in variables]
+    return wide.reindex(columns=expected)
 
 
 def _means(weighted: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
