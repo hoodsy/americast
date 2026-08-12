@@ -135,7 +135,7 @@ another run then pulls only numbers.
   "run_time": "2024-06-15T06:00:00Z",
   "valid_times": ["..."],
   "levels": [
-    {"level": "state",  "name": "CISO", "validated": true,
+    {"level": "state",  "name": "CAISO", "validated": true,
      "mw": ["..."], "clear_mw": ["..."]},
     {"level": "zone",   "name": "kern", "validated": false, "...": "..."},
     {"level": "county", "name": "Kern", "validated": false, "...": "..."}
