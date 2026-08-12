@@ -29,6 +29,7 @@ def registry(
     return pd.DataFrame(
         {
             "plant_id": list(plant_ids),
+            "plant_name": [f"Plant {pid}" for pid in plant_ids],
             "latitude": [lat for lat, _ in places],
             "longitude": [lon for _, lon in places],
             "capacity_mw_ac": list(capacities),

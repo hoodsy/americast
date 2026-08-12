@@ -5,7 +5,7 @@ from test_features import registry, weather
 
 from americast.features.table import build, load, verify, write
 from americast.region import CAISO_CA
-from americast.schemas import HRRR_WEATHER, TRAIN_TABLE
+from americast.schemas import HRRR_WEATHER, PLANTS_CA, TRAIN_TABLE
 
 # One plant per zone, because the training table's schema declares
 # every zone's weather non-nullable — a fleet missing a zone cannot be
@@ -62,6 +62,13 @@ def test_the_weather_fixture_matches_the_real_schema() -> None:
     frame = weather("2024-06-15 06:00")
     for field in HRRR_WEATHER:
         assert field.name in frame.columns
+
+
+def test_the_registry_fixture_matches_the_real_schema() -> None:
+    """The gap this closes cost an afternoon: plant_name was missing."""
+    frame = registry()
+    for field in PLANTS_CA:
+        assert field.name in frame.columns, f"fixture is missing {field.name}"
 
 
 def test_the_fold_keeps_one_row_per_run_and_hour(built: pd.DataFrame) -> None:

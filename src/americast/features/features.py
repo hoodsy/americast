@@ -145,12 +145,15 @@ def physical(weather: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     return out.fillna(0.0).sort_values(HOUR_KEYS).reset_index(drop=True)
 
 
-def hourly(frame: pd.DataFrame) -> pd.DataFrame:
+def hourly(frame: pd.DataFrame, within: tuple[str, ...] = ()) -> pd.DataFrame:
     """Instants at the hour mark -> means over the hour that follows.
 
-    frame is one row per (run_time, valid_time). Returns the same
-    shape, minus the last forecast hour of every run, with every value
-    column replaced by the average of itself and the next hour's value.
+    frame is one row per (run_time, valid_time), or per (run_time,
+    valid_time, *within) when `within` names extra keys — the API
+    passes `("plant_id",)` to align a run's 788 plants each on their
+    own clock. Returns the same shape, minus the last forecast hour of
+    every group, with every value column replaced by the average of
+    itself and the next hour's value.
 
     **This is the alignment the whole table depends on.** HRRR's
     radiation fields are instantaneous readings at valid_time. CAISO's
@@ -183,12 +186,13 @@ def hourly(frame: pd.DataFrame) -> pd.DataFrame:
     is not an hour mean of anything. One hour in 48 is a cheap price
     for a column that means exactly one thing everywhere.
     """
-    values = [c for c in frame.columns if c not in INDEX_COLUMNS]
-    ordered = frame.sort_values(HOUR_KEYS)
-    by_run = ordered.groupby("run_time")
+    skip = {*INDEX_COLUMNS, *within}
+    values = [c for c in frame.columns if c not in skip]
+    ordered = frame.sort_values(["run_time", *within, "valid_time"])
+    grouped = ordered.groupby(["run_time", *within])
 
-    next_value = by_run[values].shift(-1)
-    next_time = by_run["valid_time"].shift(-1)
+    next_value = grouped[values].shift(-1)
+    next_time = grouped["valid_time"].shift(-1)
     adjacent = next_time - ordered["valid_time"] == pd.Timedelta(hours=1)
 
     averaged = ordered.copy()

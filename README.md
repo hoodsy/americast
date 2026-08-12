@@ -56,6 +56,33 @@ uv run python -m americast.features.table    # rebuild the training table
 uv run python -m americast.features.report   # write data/reports/gate4.html
 ```
 
+## The API
+
+A read-only FastAPI service over the same data, for a separate React map
+frontend. Local only for now; hosting is its own decision.
+
+```sh
+uv run python -m americast.api.app           # http://localhost:8000, docs at /docs
+```
+
+| Endpoint | Returns |
+|---|---|
+| `GET /runs` | stored model runs, newest first |
+| `GET /plants` | 788 plants: id, name, lat, lon, capacity, county, zone |
+| `GET /runs/{run_time}/plants` | per-plant `mw` and `clearness`, 47 hours |
+| `GET /runs/{run_time}/totals` | state, zone and county curves |
+| `GET /runs/latest/...` | alias for the newest run |
+
+Two things the contract enforces rather than documents. Every value
+array is exactly as long as `valid_times`, so a client can index them
+together. And every aggregation level carries `validated`, true only for
+the state total — county and zone are estimates that sum to the graded
+number, and no consumer can present them as forecasts by accident.
+
+Per-plant values are computed on demand (~1.5 s per run) and cached, so
+nothing new is stored. Design notes:
+`docs/superpowers/specs/2026-08-12-map-api-design.md`.
+
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.13+.
