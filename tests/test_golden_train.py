@@ -118,9 +118,21 @@ def test_night_is_dark_everywhere(table: pd.DataFrame) -> None:
     assert (night["fleet_dswrf"] < 1.0).all()
 
 
-def test_the_sun_peaks_in_the_middle_of_the_local_day(table: pd.DataFrame) -> None:
+def test_the_clear_sky_curve_plateaus_across_midday(table: pd.DataFrame) -> None:
+    """A flat top, not a peak, because the fleet clips there.
+
+    Hours 10 to 13 sit within half a percent of each other, so asking
+    which one is highest gets an arbitrary answer. What is testable is
+    that the plateau lands in the middle of the local day and that the
+    shoulders fall away from it.
+    """
     by_hour = table.groupby("local_hour")["fleet_clear_mw"].mean()
-    assert 11 <= by_hour.idxmax() <= 13
+    peak = by_hour.max()
+    plateau = by_hour[by_hour > peak * 0.95].index
+
+    assert 9 <= plateau.min() and plateau.max() <= 15, "midday, in local time"
+    assert by_hour[7] < peak * 0.6, "morning is well below the plateau"
+    assert by_hour[18] < peak * 0.6, "and so is evening"
 
 
 def test_summer_out_produces_winter(table: pd.DataFrame) -> None:

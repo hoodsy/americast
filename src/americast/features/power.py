@@ -130,6 +130,35 @@ SYSTEM_LOSSES = 0.86
 # so a flat 96% would overstate the first and last hours of the day.
 INVERTER_EFFICIENCY = 0.96
 
+# Scales the Ineichen ceiling onto HRRR's own clear sky. This is a
+# calibration between two radiation models, not a claim about
+# California's air.
+#
+# Measured on 2026-08-12 across 13 runs of 2023-24, 491,712 plant-hours:
+# on hours where HRRR itself reports under 5% cloud, its GHI sits 8.9%
+# above Ineichen's at the same place and instant. HRRR's shortwave
+# scheme is known to run high in clear skies. Which model is right does
+# not matter here — clearness is a ratio of an HRRR-driven numerator to
+# this denominator, and a ratio between two models means nothing unless
+# they agree about a cloudless sky.
+#
+# Scaling the output rather than the turbidity, having measured both.
+# Fitting turbidity instead needs a Linke of 1.29, below a pure Rayleigh
+# atmosphere, and it over-corrects at low sun: a clear late afternoon
+# then reads 0.942 instead of 1. This holds 0.974 to 1.004 across the
+# whole day. All three components are scaled together, so the identity
+# ghi = dni * cos(zenith) + dhi still closes.
+CLEAR_SKY_CALIBRATION = 1.089
+
+# Below this sun elevation, expressed as a zenith angle, the clearness
+# ratio stops meaning anything: the ceiling is small, the numerator is
+# noisy, and their quotient reached 1.88 at dawn before this existed. A
+# plant here is not "0% clear", it has not started for the day, and
+# those are different claims. Costs 3.79% of the fleet's horizontal
+# irradiance, which is the price of not reporting a number we cannot
+# stand behind.
+CLEARNESS_ZENITH = 75.0
+
 # Height above sea level assumed for the clear-sky ceiling. The
 # registry carries no elevation, and California's plants sit between
 # roughly 100 and 1200 m. Measured on 2024-06-15, raising this from 0
@@ -481,32 +510,26 @@ def clear(oriented: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     returns NaN, and a NaN ceiling would divide into a NaN clearness
     index for a whole plant-day.
 
-    **This is a reference clear sky, and it sits well under a real
-    one.** Measured across the built table, the physical estimate beats
-    this ceiling on **71.3% of daylight rows**, median ratio 1.059.
-    The gap has two different shapes:
+    **The output is calibrated onto HRRR, and it has to be.** Ineichen
+    with a climatological turbidity sits 8.9% under HRRR's own
+    cloudless sky, so before CLEAR_SKY_CALIBRATION the estimate beat
+    its own ceiling on 71.3% of daylight rows. See that constant for
+    the measurement and for why the output is scaled rather than the
+    turbidity.
 
-    - Midday, a steady +4.6 to +6.5%. On a clear June day HRRR's GHI
-      runs about 10% above this model's at every hour from 09:00 to
-      16:00 local.
-    - The shoulders, where it becomes enormous: the median ratio is
-      1.88 at 05:00 local and 1.42 at 19:00. At a zenith near 86
-      degrees Ineichen attenuates the beam far harder than HRRR does —
-      75 W/m² of DNI against HRRR's 102 at dawn, 66 against 223 at
-      dusk. Both numbers are small, so those hours carry 0.1% and 1.9%
-      of the table's total error, but the ratio is unusable there.
+    Even calibrated, this is a reference clear sky rather than a hard
+    bound. A cloudless hour now reads 1.000 and the 99th percentile of
+    the ratio is 1.165, because broken cloud really can push a panel
+    above its clear-sky value. Nothing downstream may assume a
+    clearness index of one or less.
 
-    Altitude is not the cause and was re-tested at the hours where it
-    should have mattered most. At 800 m the dawn ratio gets *worse*,
-    2.54 to 2.93. The suspect is the Linke turbidity climatology, which
-    is known to read high over clean dry air.
+    The ratio stays meaningless near the horizon whatever the
+    calibration, which is why `clearness` refuses to report it below
+    CLEARNESS_ZENITH rather than this function pretending to fix it.
 
-    Nothing downstream may assume a clearness index of one or less. The
-    persistence baseline is unharmed, because it divides by this number
-    and multiplies by it again, so a steady bias cancels; a hard cap on
-    the ratio would not have that property and is deliberately absent.
-    What is harmed is the clearness index as a diagnostic, and the
-    shape of `clear_mw` as a model feature at dawn and dusk.
+    Altitude is not part of any of this. It was re-tested at the hours
+    where it should have mattered most, and at 800 m the dawn ratio
+    gets *worse*, 2.54 to 2.93.
     """
     # The merge hands back a fresh RangeIndex, so `rows` and `oriented`
     # only line up positionally. Every value below is put back through
@@ -530,8 +553,34 @@ def clear(oriented: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:
     out = oriented.copy()
     for column, field in (("dswrf", "ghi"), ("dni", "dni"), ("dhi", "dhi")):
         values = np.nan_to_num(np.asarray(sky[field]), nan=0.0)
-        out[column] = np.where(lit, values, 0.0)
+        out[column] = np.where(lit, values * CLEAR_SKY_CALIBRATION, 0.0)
     return out
+
+
+def clearness(estimated: pd.DataFrame) -> pd.Series:
+    """How much of its clear-sky ceiling each row is delivering.
+
+    estimated is `estimate`'s output, carrying `ac_mw` and `clear_mw`.
+    Returns the ratio, with NaN wherever the sun is below
+    CLEARNESS_ZENITH.
+
+    This is the number a map colours by, so it lives here rather than
+    in the caller: one definition, applied the same way to a plant, a
+    county and the state.
+
+    It is deliberately not capped at 1. Broken cloud can reflect extra
+    light onto a panel, so a reading a little above 1 is a real
+    observation, and after the calibration in `clear` the 99th
+    percentile sits at 1.165. A display may clamp its colour scale; the
+    number itself should stay honest.
+
+    NaN rather than zero at low sun, and the distinction matters. Zero
+    means "this plant is making nothing under a sky that could give it
+    something". NaN means "do not ask this question yet".
+    """
+    ceiling = estimated["clear_mw"]
+    ratio = estimated["ac_mw"] / ceiling.where(ceiling > 0.0)
+    return ratio.where(estimated["zenith"] < CLEARNESS_ZENITH)
 
 
 def estimate(weather: pd.DataFrame, plants: pd.DataFrame) -> pd.DataFrame:

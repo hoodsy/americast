@@ -3,6 +3,8 @@ import pandas as pd
 import pytest
 
 from americast.features.power import (
+    CLEAR_SKY_CALIBRATION,
+    CLEARNESS_ZENITH,
     GAMMA_PDC,
     HORIZON_ZENITH,
     INVERTER_EFFICIENCY,
@@ -10,6 +12,7 @@ from americast.features.power import (
     MAX_ROTATION,
     SYSTEM_LOSSES,
     clear,
+    clearness,
     estimate,
     generate,
     heat,
@@ -670,19 +673,21 @@ def test_estimate_runs_both_skies() -> None:
     assert (out["clear_mw"] <= 100.0 + 1e-9).all(), "the ceiling clips too"
 
 
-def test_a_loading_ratio_of_1_275_clips_only_when_it_is_cool() -> None:
+def test_heat_is_what_decides_whether_a_1_275_ratio_clips() -> None:
     """Why the temperature step had to come before this one.
 
-    1.275 of panel behind the inverter sounds like guaranteed clipping,
-    but 14% system losses spend most of the margin and hot cells spend
-    the rest. The wall is real; a June afternoon just never reaches it.
+    1.275 of panel behind the inverter does not guarantee clipping: 14%
+    system losses spend part of the margin and hot cells spend the
+    rest. Under a clear sky the wall is reached up to about 30 C air
+    and missed beyond it — the crossover moved up when the ceiling was
+    calibrated onto HRRR, because a brighter clear sky clips sooner.
     """
     rig = mounted("single_axis", dc_capacity_mw=127.5, capacity_mw_ac=100.0)
-    hot, cool = day_sky(rig), day_sky(rig)
-    hot["t2m"], cool["t2m"] = 303.15, 278.15
+    mild, baking = day_sky(rig), day_sky(rig)
+    mild["t2m"], baking["t2m"] = 303.15, 318.15
 
-    assert estimate(hot, rig)["clear_mw"].max() < 95.0, "30 C leaves headroom"
-    assert estimate(cool, rig)["clear_mw"].max() == pytest.approx(100.0), "5 C clips"
+    assert estimate(mild, rig)["clear_mw"].max() == pytest.approx(100.0), "30 C clips"
+    assert estimate(baking, rig)["clear_mw"].max() < 100.0, "45 C does not reach it"
 
 
 def test_both_skies_are_dark_at_the_same_hours() -> None:
@@ -699,6 +704,52 @@ def test_a_bright_sky_reads_as_bright() -> None:
     out = estimate(day_sky(rig), rig)
     lit = out[out["clear_mw"] > 0.0]
     assert (lit["ac_mw"] / lit["clear_mw"]).max() > 0.8
+
+
+def test_the_ceiling_is_calibrated_onto_hrrr() -> None:
+    """The scale is applied, and it does not break the sky identity."""
+    out = cleared(["2024-06-21 20:00"])
+    rebuilt = out["dni"] * out["cos_zenith"] + out["dhi"]
+    assert rebuilt.iloc[0] == pytest.approx(out["dswrf"].iloc[0], rel=1e-6), (
+        "all three components scale together or the identity breaks"
+    )
+    assert CLEAR_SKY_CALIBRATION > 1.0, "Ineichen reads under HRRR, never over"
+
+
+# --- clearness ------------------------------------------------------
+
+
+def rated(ac_mw, clear_mw, zenith) -> pd.DataFrame:
+    return pd.DataFrame({"ac_mw": ac_mw, "clear_mw": clear_mw, "zenith": zenith})
+
+
+def test_clearness_is_the_ratio_of_the_two_skies() -> None:
+    out = clearness(rated([50.0], [100.0], [30.0]))
+    assert out.iloc[0] == pytest.approx(0.5)
+
+
+def test_clearness_refuses_to_answer_near_the_horizon() -> None:
+    """1.88 at dawn is what this exists to stop reporting."""
+    out = clearness(rated([10.0, 10.0], [20.0, 20.0], [30.0, CLEARNESS_ZENITH + 1]))
+    assert out.iloc[0] == pytest.approx(0.5)
+    assert pd.isna(out.iloc[1])
+
+
+def test_a_dark_plant_under_a_lit_sky_reads_zero_not_null() -> None:
+    """Zero and null are different claims and must stay different."""
+    out = clearness(rated([0.0], [5000.0], [20.0]))
+    assert out.iloc[0] == 0.0
+
+
+def test_a_zero_ceiling_gives_null_not_infinity() -> None:
+    out = clearness(rated([0.0], [0.0], [20.0]))
+    assert pd.isna(out.iloc[0])
+
+
+def test_clearness_is_not_capped_at_one() -> None:
+    """Broken cloud really can push a panel past its clear-sky value."""
+    out = clearness(rated([110.0], [100.0], [30.0]))
+    assert out.iloc[0] == pytest.approx(1.1)
 
 
 def test_the_ceiling_ignores_the_clouds_but_keeps_the_air() -> None:

@@ -176,28 +176,52 @@ have mattered most: at 800 m the dawn ratio gets worse, 2.54 -> 2.93.
 The suspect is the Linke turbidity climatology, which reads high over
 clean dry air.
 
-**The fix: scale Linke turbidity by a single fitted factor.** One number
-for the fleet, chosen so the ceiling envelopes HRRR's own clear-sky
-hours. Clearness is a ratio of two HRRR-derived quantities, so the
-denominator should be consistent with the numerator's source — on a
-clear June day HRRR's GHI runs about 10% above Ineichen's at every
-midday hour.
+**IMPLEMENTED 2026-08-12, and not as specified above.** Measurement
+changed the fix; this section records what was actually done and why.
 
-Turbidity is scaled rather than the output irradiance, because that
-stays physical: less turbidity is cleaner air, which shifts the
-beam/diffuse split correctly and attenuates less at high airmass, so it
-helps the shoulders as well as the level.
+The spec proposed scaling Linke turbidity. Measured across 13 runs of
+2023-24 and 491,712 plant-hours, that does not work: making the ceiling
+an envelope needs a Linke of 1.29, below a pure Rayleigh atmosphere, so
+it stops being turbidity in any physical sense. It also over-corrects at
+low sun — a clear late afternoon then reads 0.942.
 
-**No label enters the fit**, so there is nothing to leak into Gate 5's
-test period. The factor is fitted against HRRR's own irradiance. The fit
-is restricted to 2023-24 anyway, as a second line of defence.
+The original target was wrong too. Aiming for the 95th percentile of the
+ratio to equal 1.0 assumes most hours are cloudy; California's are not,
+so the median hour is already close to clear. The right target is
+defined by HRRR's own cloud field: **when HRRR reports under 5% cloud,
+clearness should read 1.0.**
 
-Acceptance criteria:
+**What was implemented: `CLEAR_SKY_CALIBRATION = 1.089`**, scaling
+Ineichen's ghi, dni and dhi together so the identity still closes. On
+HRRR-cloudless hours its GHI sits 8.9% above Ineichen's; HRRR's
+shortwave scheme runs high in clear skies. Which model is right does not
+matter, because a ratio between two models means nothing unless they
+agree about a cloudless sky.
 
-1. On hours above the light threshold, clearness exceeds 1.0 on under 5%
-   of rows.
-2. On HRRR-clear hours, median clearness sits within 0.02 of 1.0.
-3. The Gate 4 golden tests still pass.
+| | clear hour reads | p99 | across zenith 0→75 |
+|---|---|---|---|
+| turbidity ×0.597 | 1.000 | 1.062 | 0.995 → 0.942 |
+| **output ×1.089** | 1.000 | 1.165 | 0.974 → 1.004 |
+
+**No label enters the fit**, so nothing can leak into Gate 5's test
+period. The fit used 2023-24 only, as a second line of defence.
+
+**Plus `CLEARNESS_ZENITH = 75.0` and `power.clearness()`.** Near the
+horizon the ratio is meaningless whatever the calibration, so it is
+reported as null rather than patched. Costs 3.79% of the fleet's
+horizontal irradiance.
+
+Acceptance, measured after the change:
+
+1. Statewide cloudless hours read **1.012** — target 1.00 ± 0.02, pass.
+2. Per-plant reported rows on a real June run: median 1.004, p99 1.198,
+   0.28% above 1.3. December run: median 1.010, p99 1.262.
+3. All Gate 4 tests pass; the training table was rebuilt (1103 runs,
+   51,841 rows) and `docs/training_table.md` updated.
+
+One Gate 4 test legitimately changed meaning: a brighter ceiling makes a
+1.275 loading ratio clip at 30 C air where it previously did not, so the
+clipping-threshold test now pins 30 C clips / 45 C does not.
 
 Clearness is **not** capped at 1.0. Cloud enhancement is real, so a
 value slightly above 1 is information; a cap would hide the bias instead

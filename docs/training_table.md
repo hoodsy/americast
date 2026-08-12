@@ -23,7 +23,7 @@ only thing the model in Gate 5 reads.
 Five zones: kern, mojave, imperial, central_valley, coastal.
 
 Rebuild it with `uv run python -m americast.features.table`. The build
-is a fold over run files and takes about ten minutes for 653 runs.
+is a fold over run files and takes about twenty minutes for 1100 runs.
 Nothing is incremental. Features change far more often than the weather
 store grows, and an append-only table is one that quietly holds two
 definitions of the same column.
@@ -79,83 +79,103 @@ the megawatts are summed. The chain runs twice, once on HRRR's sky and
 once on a clear one, so every level carries both a forecast and a
 ceiling.
 
-Scored on daylight hours where all three predictors exist:
+Scored on daylight hours where all three predictors exist, over
+2023-01 → 2026-01:
 
 | Predictor | MAE | Bias |
 |---|---|---|
-| Physical model | 1141 MW | +423 MW |
-| Smart persistence | 1262 MW | −54 MW |
-| Clear-sky persistence | 1312 MW | −15 MW |
-| Naive zero | 10,092 MW | −10,092 MW |
+| Physical model | 1215 MW | +179 MW |
+| Smart persistence | 1335 MW | −13 MW |
+| Clear-sky persistence | 1418 MW | −6 MW |
+| Naive zero | 10,785 MW | −10,785 MW |
 
 The physics beats both baselines with nothing fitted to anything. That
 is the bar Gate 5 has to clear, and it is a demanding one.
 
-**The +423 MW bias is a real signal, not noise.** It is about 4%, and
-the chain has exactly one constant that could produce a flat
-multiplicative offset: `SYSTEM_LOSSES`, currently 14%. It has been left
-alone deliberately. Fitting it against the whole record would put test
-period information into a training-time constant, which is the leak
-Gate 5 exists to avoid. Fit it on 2023–2024 only, if at all.
+**The +179 MW bias is a seasonal cancellation, not a flat offset.** See
+the decomposition below: it is +33% in March and −9% in September, so
+`SYSTEM_LOSSES` cannot be tuned to remove it. Fitting that constant
+against the whole record would also put test-period information into a
+training-time value, which is the leak Gate 5 exists to avoid.
 
-## The ceiling sits under the real sky, and by how much
+## The ceiling is calibrated onto HRRR
 
-`clear_mw` is a **reference** clear sky, not a hard bound — and the gap
-is bigger than a footnote. The physical estimate exceeds its own
-ceiling on **71.3% of daylight rows**, median ratio 1.059.
+`clear_mw` is a **reference** clear sky, not a hard bound, and it needed
+a correction before anything could be built on the clearness ratio.
 
-| Local hour | 5 | 7 | 10-15 | 17 | 19 |
-|---|---|---|---|---|---|
-| median estimate / ceiling | 1.88 | 1.13 | ~1.05 | 1.11 | 1.42 |
+Uncalibrated, the physical estimate exceeded its own ceiling on **71.3%
+of daylight rows**, median 1.059, reaching 1.88 at dawn. The cause is
+not the atmosphere: on hours where HRRR itself reports under 5% cloud,
+its GHI sits **8.9% above Ineichen's** at the same place and instant.
+HRRR's shortwave scheme runs high in clear skies. Which model is right
+does not matter — clearness is a ratio of an HRRR-driven numerator to
+this denominator, and a ratio between two models means nothing unless
+they agree about a cloudless sky.
 
-Two different faults wear one number:
+**Fixed 2026-08-12 by `CLEAR_SKY_CALIBRATION = 1.089`**, scaling
+Ineichen's output onto HRRR, fitted across 13 runs of 2023-24 and
+491,712 plant-hours. No label enters the fit, so nothing can leak into
+Gate 5's test period.
 
-- **Midday, a steady +4.6 to +6.5%.** On a clear June day HRRR's GHI
-  runs ~10% above Ineichen's at every hour from 09:00 to 16:00.
-- **The shoulders, where the ratio breaks.** At a zenith near 86°,
-  Ineichen attenuates the beam far harder than HRRR: 75 W/m² of DNI
-  against HRRR's 102 at dawn, 66 against 223 at dusk. The megawatts
-  there are small — hours 5 and 19 carry 0.1% and 1.9% of total error
-  — so this is a broken ratio, not a broken forecast.
+The output is scaled rather than the turbidity, having measured both:
 
-**Altitude is not the cause.** The first test measured it at the noon
-peak, which is the one hour where airmass matters least. Re-tested
-across the day: at 800 m the dawn ratio gets *worse*, 2.54 → 2.93. The
-suspect is the Linke turbidity climatology, which reads high over clean
-dry air.
+| | clear hour reads | p99 | across zenith 0→75 |
+|---|---|---|---|
+| turbidity ×0.597 | 1.000 | 1.062 | 0.995 → 0.942 |
+| **output ×1.089** | 1.000 | 1.165 | 0.974 → 1.004 |
 
-What this costs: the clearness index is unusable as a diagnostic (it
-exceeds 1 most of the time), and `clear_mw`'s shape is distorted at
-dawn and dusk. What it does not cost: the persistence baseline, which
-divides by the ceiling and multiplies by it again, so a steady bias
-cancels. No cap is applied, because a cap would not have that property.
+Fitting turbidity instead needs a Linke of 1.29 — below a pure Rayleigh
+atmosphere, so no longer "turbidity" in any physical sense — and it
+over-corrects at low sun, making a clear late afternoon read 0.942. All
+three components are scaled together, so `ghi = dni·cos(z) + dhi` still
+closes.
 
-## Why the error is 1141 MW, and what it is made of
+**Altitude was never the cause,** and was re-tested at the hours where
+it should have mattered most. At 800 m the dawn ratio gets *worse*,
+2.54 → 2.93.
 
-11.3% of mean daylight generation, 5.3% of installed capacity. Almost
-none of it is fixable by calibration — removing the flat bias takes it
-to 1103 MW, and a single scale factor makes it *worse* at 1175 MW.
+After calibration, a statewide cloudless hour reads **1.012**. The ratio
+is still not capped at 1: broken cloud genuinely pushes panels above
+their clear-sky value, and hiding that would be a worse lie than
+reporting it.
+
+**Near the horizon the ratio stays meaningless whatever the
+calibration.** `power.clearness()` therefore refuses to report it above
+a zenith of 75° — a plant there has not started for the day, which is a
+different claim from "0% clear". That costs 3.79% of the fleet's
+horizontal irradiance. On the reported rows of a real June run: median
+1.004, p99 1.198, and 0.28% above 1.3.
+
+## Why the error is 1215 MW, and what it is made of
+
+Measured over 2023-01 → 2026-01, 27,684 graded daylight hours: 11.3% of
+mean daylight generation, 5.6% of installed capacity. Almost none of it
+is fixable by calibration — removing the flat bias takes it to 1204 MW,
+and a single scale factor makes it *worse* at 1242 MW.
 
 The reason is that the residual is two large effects of opposite sign
 plus cloud noise. Restricted to clear midday hours, where the physics
-should be at its best, the bias by month is:
+should be at its best, the bias by month:
 
-| Month | Jan | Feb | **Mar** | Apr | May | Jun | Jul | Aug | Sep | Oct |
-|---|---|---|---|---|---|---|---|---|---|---|
-| bias | +8% | +6% | **+32%** | +13% | +7% | −2% | −4% | −6% | −8% | −6% |
+| Month | Jan | Feb | **Mar** | Apr | May | Jun | Jul | Aug | Sep | Oct | Nov | Dec |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| bias | +1% | +7% | **+33%** | +13% | +5% | −3% | −6% | −7% | −9% | −7% | −6% | −2% |
 
-- **Spring over-prediction is curtailment.** March reads +32% — 3762 MW
-  on clear midday hours. High output, mild demand and hydro running is
-  exactly when CAISO curtails solar hardest. Curtailed generation is
-  real sunlight that never reaches the fuel mix, and no irradiance
-  model can see an economic decision.
-- **Summer under-prediction is missing capacity.** June to December run
-  −2 to −8%. The registry is state-filtered, so the ~2.5 GW of Arizona
+- **Spring over-prediction is curtailment.** March reads +33%. High
+  output, mild demand and hydro running is exactly when CAISO curtails
+  solar hardest. Curtailed generation is real sunlight that never
+  reaches the fuel mix, and no irradiance model can see an economic
+  decision.
+- **Autumn under-prediction is missing capacity.** June to December run
+  −2 to −9%. The registry is state-filtered, so the ~2.5 GW of Arizona
   and Nevada solar inside CAISO's balancing authority is absent (see
-  `plant_registry.md`). With curtailment low in summer, that gap shows.
+  `plant_registry.md`). With curtailment low then, that gap shows.
 - **Clouds are the smallest term.** Bucketing midday hours by HRRR's own
   cloud cover: clear 8.0% error, few 10%, scattered 12%, broken 14%,
   overcast 16%. Going from a clear sky to a broken one adds ~270 MW.
+
+The pattern is stable — it was first measured on 22 months and held
+when the table grew to three years.
 
 This is good news for Gate 5. Both large terms are **learnable from
 features the table already carries** — curtailment from month, hour and
