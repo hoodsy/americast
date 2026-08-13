@@ -46,6 +46,29 @@ CAISO_CURTAILMENT = pa.schema(
     ]
 )
 
+# EIA-923 monthly net generation, solar plants only.
+#
+# The only per-plant truth this project has. CAISO publishes one number
+# for the whole state, which can say that the fleet out-produces the
+# physical model but never which plants do. This can.
+#
+# month is the first instant of the reporting month, UTC. Net
+# generation is metered at the plant's grid connection over the whole
+# month, so it is energy, not power, and it is net of station service —
+# the same convention as the CAISO label, one level down.
+#
+# Not every plant reports here. EIA collects monthly from larger
+# generators and annually from the rest, so this covers about two
+# thirds of CISO capacity. It is a sample, and a sample is enough to
+# compare one vintage against another.
+EIA923_SOLAR_MONTHLY = pa.schema(
+    [
+        pa.field("plant_id", pa.int64(), nullable=False),
+        pa.field("month", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("net_generation_mwh", pa.float64(), nullable=False),
+    ]
+)
+
 # HRRR forecast fields extracted at plant locations. One row per
 # (run_time, forecast hour, plant). Native GRIB units stored — dswrf,
 # dni and dhi W/m², tcdc %, t2m Kelvin, w10m m/s — unit conversion
