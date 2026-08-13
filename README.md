@@ -45,7 +45,7 @@ the ratio of the two is the clearness index.
 On daylight hours across 2023-01 → 2024-10, the unfitted physics reaches
 **1141 MW mean absolute error** against CAISO, beating both persistence
 baselines (1262 and 1312 MW) and a naive zero (10,092 MW). That is the
-bar the Gate 5 model has to clear.
+bar the model has to clear, and it is a demanding one.
 
 Only the statewide number is graded. County and zone figures are
 physically-derived estimates that sum to it, and no hourly public truth
@@ -54,6 +54,36 @@ exists to check them against.
 ```sh
 uv run python -m americast.features.table    # rebuild the training table
 uv run python -m americast.features.report   # write data/reports/gate4.html
+```
+
+## The model
+
+Three LightGBM boosters — p10, p50 and p90 — fitted on 2023-2024,
+early-stopped on 2025 H1, and graded on 2025-07 onward. They predict the
+share of the clear-sky ceiling the fleet delivers, not megawatts
+directly, because the fleet outgrew its own training range: a tenth of
+the test period sits above the highest label the model ever saw.
+
+On the test period the model reaches **1236 MW mean absolute error**
+against 1723 MW for clear-sky persistence and 1525 MW for the unfitted
+physics — 28.3% skill against the baseline the build plan names, and
+19.0% against the physics. It wins every lead bucket at 4 hours and
+beyond.
+
+Two things it does not do well, both measured rather than hidden. The
+p10–p90 band covers 58.6% of hours where it claims 80%, and it sits too
+low rather than being too narrow. The cause is that CAISO delivered
+0.967× the physics during training and 1.023× during the test period:
+the registry's newest plant is dated 2025-12, so plants commissioned
+during the test period generate real megawatts and add no ceiling. The
+model learned the first number and was graded against the second.
+Details, and why refitting that constant would be a leak:
+`docs/model.md`.
+
+```sh
+uv run python -m americast.model.model       # fit and save to data/model/
+uv run python -m americast.model.eval        # score the test period
+uv run python -m americast.model.report      # write data/reports/gate5.html
 ```
 
 ## The API
