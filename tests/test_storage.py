@@ -122,3 +122,18 @@ def test_listdir_is_sorted_and_filtered(tmp_path) -> None:
 def test_listdir_on_a_missing_prefix_is_empty_not_an_error(tmp_path) -> None:
     """A first run has no store yet, and that is not a failure."""
     assert storage.listdir(tmp_path / "never_written") == []
+
+
+def test_listdir_results_can_be_read_back(tmp_path) -> None:
+    """The round trip every fold depends on.
+
+    `features.table.build` lists the run store and reads each path it
+    gets back. pyarrow reports S3 objects as `bucket/key` with no
+    scheme, and a scheme-less string resolves as a local path — so
+    without restoring it, listing a remote store yields paths that
+    cannot be opened.
+    """
+    storage.write_parquet(table(), tmp_path / "a.parquet")
+    storage.write_parquet(table(), tmp_path / "b.parquet")
+    for found in storage.listdir(tmp_path, ".parquet"):
+        assert len(storage.read_parquet(found)) == 3

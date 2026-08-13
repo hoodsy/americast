@@ -158,6 +158,12 @@ def listdir(location: Path | str, suffix: str = "") -> list[str]:
     Replaces `Path.glob` for stores that are read as a set — the weather
     runs above all. Sorted because several callers depend on time order
     and get it from the filename.
+
+    **The results go straight back into `read_parquet`.** pyarrow reports
+    S3 paths as `bucket/key`, with no scheme, and `_resolve` reads a
+    scheme-less string as a local path — so returning them raw produced
+    a `FileNotFoundError` naming a key that plainly existed. The scheme
+    is put back here, which is the only place that knows it was stripped.
     """
     filesystem, path = _resolve(location)
     selector = pafs.FileSelector(path, allow_not_found=True, recursive=False)
@@ -166,7 +172,8 @@ def listdir(location: Path | str, suffix: str = "") -> list[str]:
         for info in filesystem.get_file_info(selector)
         if info.type == pafs.FileType.File and info.path.endswith(suffix)
     ]
-    return sorted(found)
+    remote = not isinstance(filesystem, pafs.LocalFileSystem)
+    return sorted(f"s3://{item}" if remote else item for item in found)
 
 
 def _resolve(location: Path | str) -> tuple[pafs.FileSystem, str]:
