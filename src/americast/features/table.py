@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
+from americast import storage
 from americast.features.baselines import attach
 from americast.features.features import (
     aggregate,
@@ -33,13 +33,13 @@ from americast.ingest.hrrr import HRRR_DIR
 from americast.region import CAISO_CA, RegionConfig
 from americast.schemas import TRAIN_TABLE
 
-STORE_PATH = Path("data/train/table.parquet")
+STORE_PATH = storage.key("train/table.parquet")
 
 
 def build(
     region: RegionConfig = CAISO_CA,
-    hrrr_dir: Path = HRRR_DIR,
-    caiso_path: Path = CAISO_STORE,
+    hrrr_dir: Path | str = HRRR_DIR,
+    caiso_path: Path | str = CAISO_STORE,
 ) -> pd.DataFrame:
     """Fold every stored HRRR run into one table and join the label.
 
@@ -54,30 +54,29 @@ def build(
     alternative is a column that means an instant on some rows and a
     mean on others.
     """
-    plants = fleet(pd.read_parquet(region.plant_registry_path))
-    label = to_hourly(pd.read_parquet(caiso_path))
+    plants = fleet(storage.read_parquet(region.plant_registry_path))
+    label = to_hourly(storage.read_parquet(caiso_path))
 
-    runs = sorted(hrrr_dir.glob("hrrr_*.parquet"))
+    runs = storage.listdir(hrrr_dir, ".parquet")
     if not runs:
         raise FileNotFoundError(f"no HRRR runs in {hrrr_dir}")
 
-    rows = [one_run(pd.read_parquet(path), plants, region) for path in runs]
+    rows = [one_run(storage.read_parquet(path), plants, region) for path in runs]
     stacked = pd.concat(rows, ignore_index=True)
     labelled = _attach_label(stacked, label)
     return attach(labelled, region)
 
 
-def write(frame: pd.DataFrame, path: Path = STORE_PATH) -> None:
+def write(frame: pd.DataFrame, path: Path | str = STORE_PATH) -> None:
     """Write the table, letting the declared schema check every column."""
-    path.parent.mkdir(parents=True, exist_ok=True)
     ordered = frame[[field.name for field in TRAIN_TABLE]]
     table = pa.Table.from_pandas(ordered, schema=TRAIN_TABLE, preserve_index=False)
-    pq.write_table(table, path)
+    storage.write_parquet(table, path)
 
 
-def load(path: Path = STORE_PATH) -> pd.DataFrame:
+def load(path: Path | str = STORE_PATH) -> pd.DataFrame:
     """Read the table back."""
-    return pd.read_parquet(path)
+    return storage.read_parquet(path)
 
 
 def verify(table: pd.DataFrame) -> dict:

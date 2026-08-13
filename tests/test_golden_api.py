@@ -190,9 +190,17 @@ def test_only_the_state_claims_to_be_graded(curves) -> None:
     assert graded == [CAISO_CA.iso]
 
 
-def test_the_five_zones_are_all_present(curves) -> None:
+def test_every_zone_is_present(curves) -> None:
+    """Read from ZONES rather than listed, so a new zone cannot be missed.
+
+    A hard-coded set of five silently stopped describing the fleet when
+    Arizona's `sonoran` was added, and a test that lists what it expects
+    is a test that has to be remembered.
+    """
+    from americast.features.county import ZONES
+
     zones = {level.name for level in curves.levels if level.level == "zone"}
-    assert zones == {"kern", "mojave", "imperial", "central_valley", "coastal"}
+    assert zones == set(ZONES)
 
 
 def test_the_counties_are_plausible(curves) -> None:

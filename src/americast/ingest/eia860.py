@@ -31,15 +31,14 @@ peak of 23,208 MW sat above the whole modelled fleet. See docs/model.md
 for what that did to the confidence band.
 """
 
-import os
 import urllib.request
 import zipfile
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
+from americast import storage
 from americast.features.county import CISO_BA
 from americast.schemas import PLANTS_CISO
 
@@ -54,7 +53,7 @@ EIA860M_URL = (
 )
 
 RAW_DIR = Path("data/eia860")
-REGISTRY_PATH = Path("data/registry/plants_ciso.parquet")
+REGISTRY_PATH = storage.key("registry/plants_ciso.parquet")
 
 _PLANT_XLSX = "2___Plant_Y2025_Early_Release.xlsx"
 _SOLAR_XLSX = "3_3_Solar_Y2025_Early_Release.xlsx"
@@ -333,7 +332,7 @@ def _reported_tilt(merged: pd.DataFrame) -> pd.Series:
     return reported.fillna(blank).astype("float64")
 
 
-def write_registry(df: pd.DataFrame, path: Path = REGISTRY_PATH) -> None:
+def write_registry(df: pd.DataFrame, path: Path | str = REGISTRY_PATH) -> None:
     """Write the registry in one atomic step.
 
     Every backfill worker re-reads this file at the start of each run,
@@ -343,11 +342,8 @@ def write_registry(df: pd.DataFrame, path: Path = REGISTRY_PATH) -> None:
     os.replace is atomic within a filesystem, which the temp file is
     guaranteed to share by sitting in the same directory.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pandas(df, schema=PLANTS_CISO, preserve_index=False)
-    staged = path.with_suffix(".parquet.tmp")
-    pq.write_table(table, staged)
-    os.replace(staged, path)
+    storage.write_parquet(table, path)
 
 
 def verify(registry: pd.DataFrame) -> dict:

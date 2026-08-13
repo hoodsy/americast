@@ -49,11 +49,11 @@ from pathlib import Path
 import gridstatus
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
+from americast import storage
 from americast.schemas import CAISO_CURTAILMENT
 
-STORE_PATH = Path("data/caiso/curtailment_hourly.parquet")
+STORE_PATH = storage.key("caiso/curtailment_hourly.parquet")
 
 # The last day CAISO published in the old format. gridstatus refuses
 # `get_curtailment_legacy` after it and returns nothing useful from
@@ -159,9 +159,9 @@ def _polite_day(day: date) -> pd.DataFrame:
     return frame
 
 
-def load(path: Path = STORE_PATH) -> pd.DataFrame:
+def load(path: Path | str = STORE_PATH) -> pd.DataFrame:
     """Read the stored hourly curtailment series."""
-    return pd.read_parquet(path)
+    return storage.read_parquet(path)
 
 
 def verify(frame: pd.DataFrame) -> dict:
@@ -231,9 +231,9 @@ def _empty() -> pd.DataFrame:
 
 def _stored_days(path: Path) -> set[date]:
     """Local days already in the store."""
-    if not path.exists():
+    if not storage.exists(path):
         return set()
-    stored = pd.read_parquet(path, columns=["utc_time"])
+    stored = storage.read_parquet(path, columns=["utc_time"])
     if stored.empty:
         return set()
     return set(stored["utc_time"].dt.tz_convert("UTC").dt.date)
@@ -241,10 +241,9 @@ def _stored_days(path: Path) -> set[date]:
 
 def _append(frame: pd.DataFrame, path: Path) -> None:
     """Append, de-duplicate on utc_time, and re-write under the schema."""
-    path.parent.mkdir(parents=True, exist_ok=True)
     combined = frame
-    if path.exists():
-        combined = pd.concat([pd.read_parquet(path), frame], ignore_index=True)
+    if storage.exists(path):
+        combined = pd.concat([storage.read_parquet(path), frame], ignore_index=True)
     combined = (
         combined.drop_duplicates("utc_time", keep="last")
         .sort_values("utc_time", ignore_index=True)
@@ -254,7 +253,7 @@ def _append(frame: pd.DataFrame, path: Path) -> None:
         schema=CAISO_CURTAILMENT,
         preserve_index=False,
     )
-    pq.write_table(table, path)
+    storage.write_parquet(table, path)
 
 
 if __name__ == "__main__":

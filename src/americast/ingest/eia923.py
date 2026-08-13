@@ -45,12 +45,12 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
+from americast import storage
 from americast.schemas import EIA923_SOLAR_MONTHLY
 
 RAW_DIR = Path("data/eia923")
-STORE_PATH = Path("data/eia923/solar_monthly.parquet")
+STORE_PATH = storage.key("eia923/solar_monthly.parquet")
 
 _ARCHIVE = "https://www.eia.gov/electricity/data/eia923/archive/xls/f923_{year}.zip"
 _CURRENT = "https://www.eia.gov/electricity/data/eia923/xls/f923_{year}.zip"
@@ -153,20 +153,19 @@ def build(years: tuple[int, ...] = YEARS, raw_dir: Path = RAW_DIR) -> pd.DataFra
     )
 
 
-def write(frame: pd.DataFrame, path: Path = STORE_PATH) -> None:
+def write(frame: pd.DataFrame, path: Path | str = STORE_PATH) -> None:
     """Write under the declared schema."""
-    path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pandas(
         frame[[field.name for field in EIA923_SOLAR_MONTHLY]],
         schema=EIA923_SOLAR_MONTHLY,
         preserve_index=False,
     )
-    pq.write_table(table, path)
+    storage.write_parquet(table, path)
 
 
-def load(path: Path = STORE_PATH) -> pd.DataFrame:
+def load(path: Path | str = STORE_PATH) -> pd.DataFrame:
     """Read the stored plant-months."""
-    return pd.read_parquet(path)
+    return storage.read_parquet(path)
 
 
 def verify(frame: pd.DataFrame, registry: pd.DataFrame | None = None) -> dict:

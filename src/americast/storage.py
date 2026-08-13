@@ -99,15 +99,34 @@ def read_schema(location: Path | str) -> pa.Schema:
 
 
 def write_parquet(table: pa.Table, location: Path | str) -> None:
-    """Write a parquet store, creating any parent directory.
+    """Write a parquet store atomically, creating any parent directory.
 
     Object storage has no directories, so the mkdir is a local-only
     concern and is skipped remotely rather than emulated.
+
+    **A reader sees the whole old file or the whole new one, never a
+    half-written one.** On S3 that is free: `PutObject` is atomic and a
+    GET during an overwrite returns the previous object. Locally it is
+    not, so the write goes to a neighbouring temp file and is renamed —
+    `os.replace` being atomic within a filesystem, which a sibling path
+    is guaranteed to share.
+
+    This matters because stores are read while they are rewritten. Every
+    HRRR backfill worker re-reads the registry at the start of each run,
+    and a dozen of them are running when a rebuild lands.
     """
     filesystem, path = _resolve(location)
     _ensure_parent(filesystem, path)
-    with filesystem.open_output_stream(path) as sink:
+
+    if not isinstance(filesystem, pafs.LocalFileSystem):
+        with filesystem.open_output_stream(path) as sink:
+            pq.write_table(table, sink)
+        return
+
+    staged = f"{path}.tmp"
+    with filesystem.open_output_stream(staged) as sink:
         pq.write_table(table, sink)
+    os.replace(staged, path)
 
 
 def write_text(location: Path | str, text: str) -> None:
