@@ -32,6 +32,7 @@ half-migrated system that looks like a working one.
 """
 
 import os
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -130,10 +131,17 @@ def write_parquet(table: pa.Table, location: Path | str) -> None:
 
 
 def write_text(location: Path | str, text: str) -> None:
-    """Write a text file — the JSON contracts, and nothing else so far."""
+    """Write a text file — the JSON contracts, and nothing else so far.
+
+    A `.json` object is tagged `application/json` on the way out. S3
+    defaults every upload to `application/octet-stream`, which a browser
+    will still parse but will not preview, and which makes the object
+    look like a download rather than an API response.
+    """
     filesystem, path = _resolve(location)
     _ensure_parent(filesystem, path)
-    with filesystem.open_output_stream(path) as sink:
+    metadata = {"Content-Type": "application/json"} if path.endswith(".json") else None
+    with filesystem.open_output_stream(path, metadata=metadata) as sink:
         sink.write(text.encode())
 
 
@@ -164,13 +172,42 @@ def listdir(location: Path | str, suffix: str = "") -> list[str]:
 def _resolve(location: Path | str) -> tuple[pafs.FileSystem, str]:
     """Split a location into the filesystem that holds it and its path.
 
-    `FileSystem.from_uri` returns the path already stripped of the
-    scheme and bucket, which is the form every pyarrow call wants.
+    `S3FileSystem` is constructed directly rather than through
+    `FileSystem.from_uri`, which would also work — both run the AWS
+    SDK's normal credential chain. The reason is caching: `from_uri`
+    builds a fresh filesystem, and therefore re-initialises the SDK,
+    on every call. `_s3` builds one per region and keeps it.
+
+    Paths lose the scheme and keep the bucket, which is the form every
+    pyarrow call wants.
     """
     text = str(location)
-    if text.startswith("s3://"):
-        return pafs.FileSystem.from_uri(text)
-    return pafs.LocalFileSystem(), str(Path(text))
+    if not text.startswith("s3://"):
+        return pafs.LocalFileSystem(), str(Path(text))
+    return _s3(_region()), text[len("s3://") :]
+
+
+def _region() -> str | None:
+    """The region for S3 calls, or None to let the SDK work it out."""
+    return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+
+
+@lru_cache(maxsize=4)
+def _s3(region: str | None) -> pafs.S3FileSystem:
+    """One filesystem per region, reused.
+
+    Constructing an S3FileSystem initialises the AWS SDK and resolves
+    credentials, which is far too expensive to repeat for every object
+    in a fold over a thousand runs.
+
+    Credentials come from the SDK's own chain, which reads the standard
+    environment variables and `~/.aws/credentials`. Note that it does
+    **not** honour `AWS_PROFILE` the way the `aws` CLI does, and it does
+    not understand the session `aws login` writes — so a shell where the
+    CLI works is not necessarily a shell where this works. Export real
+    credentials into the environment, which is what CI does anyway.
+    """
+    return pafs.S3FileSystem(region=region) if region else pafs.S3FileSystem()
 
 
 def _ensure_parent(filesystem: pafs.FileSystem, path: str) -> None:
