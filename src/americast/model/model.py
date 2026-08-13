@@ -311,11 +311,22 @@ def _dataset(rows: pd.DataFrame, reference: lgb.Dataset | None = None) -> lgb.Da
 
 
 if __name__ == "__main__":
+    import sys
+
     from americast.features.table import load
-    from americast.model.split import split
+    from americast.model.split import split, trailing
     from americast.model.split import verify as verify_split
 
-    parts = split(load())
+    # `--trailing` fits the most recent window instead of the build
+    # plan's fixed dates. That is the production mode: the fleet drifts
+    # about 4% a year against the physical model, and a trailing window
+    # bounds how stale the fit can get. The fixed split stays the
+    # default so Gate 5's published numbers stay reproducible.
+    rolling = "--trailing" in sys.argv
+    table = load()
+    parts = trailing(table) if rolling else split(table)
+    print(f"split: {'trailing window' if rolling else 'fixed Gate 5 dates'}")
+
     layout = verify_split(parts)
     print("  rows:", layout["graded_rows"], f"overlap={layout['overlap']}")
     for name in ("train", "validate", "test"):
