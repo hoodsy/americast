@@ -13,9 +13,11 @@ utility-scale solar output, hourly, in MW.
 - `data/caiso/solar_5min.parquet` — CAISO fuel-mix solar actuals at native
   5-minute resolution, 2023-01-01 → present. Quality notes:
   `docs/caiso_data_quality.md`.
-- `data/registry/plants_ca.parquet` — California utility-scale solar PV
-  registry from EIA-860 (2025 Early Release): 928 operating plants,
-  23.88 GW AC, with county and balancing authority for sub-state grouping.
+- `data/registry/plants_ciso.parquet` — the CAISO utility-scale solar PV
+  fleet: 833 operating plants, 24.23 GW AC, with county and balancing
+  authority for sub-state grouping. Built from EIA-860M (monthly
+  inventory, June 2026) for who is running, and the EIA-860 annual Solar
+  schedule (2025 Early Release) for array geometry.
 
 - `data/hrrr/hrrr_<YYYYMMDD>_<HH>z.parquet` — HRRR forecasts sampled at
   every plant, one file per model run, f01–f48. Weather grids are never
@@ -25,13 +27,16 @@ utility-scale solar output, hourly, in MW.
   megawatts, calendar columns, the CAISO label and two baselines.
   Details: `docs/training_table.md`.
 
-**Registry sanity check:** the CAISO-BA slice of the registry is 21.52 GW
-across 788 plants. Observed fuel-mix peak (Aug 2026) is 23.35 GW — higher,
-because (1) CAISO's balancing authority includes ~2.5 GW of solar in
-Arizona and Nevada that a state-filtered registry excludes, and (2) the
-2025 filing cannot see plants energized in 2026. Including out-of-state
-CISO plants, installed CISO capacity is 24.0 GW and the peak/installed
-ratio is a physically sensible 0.97. Details: `docs/plant_registry.md`.
+**The filter is the balancing authority, not the state.** CAISO is a
+balancing authority whose territory reaches into Arizona and Nevada, so a
+`state == CA` filter was wrong in both directions at once: it admitted 140
+Californian plants in LDWP, IID, BANC, PacifiCorp and WALC whose output
+never reaches CAISO's number, and it excluded 2,478 MW of Arizona and
+Nevada solar whose output does. The second error made the modelled
+clear-sky ceiling smaller than the fleet it was meant to bound — CAISO's
+23.21 GW peak sat above the whole modelled fleet, which is impossible and
+was the tell. At 24.23 GW the peak/installed ratio is a physically
+sensible 0.96. Details: `docs/plant_registry.md`.
 
 ## The physical model
 

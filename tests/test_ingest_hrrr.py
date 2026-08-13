@@ -377,3 +377,43 @@ def test_verify_reports_stored_shape(tmp_path) -> None:
     assert out["fhours"].iloc[0] == 48
     assert out["plants"].iloc[0] == 3
     assert out["rows"].iloc[0] == 144
+
+
+def test_uncovered_plants_finds_a_plant_the_store_never_sampled(tmp_path) -> None:
+    """The check that has to run after every registry change.
+
+    A plant added to the registry gets no weather from a rebuild. The
+    grids were discarded, so only a refetch can sample a new coordinate,
+    and `aggregate` inner-joins — a missing plant weighs nothing and
+    raises nothing.
+    """
+    from test_features import registry as registry_fixture
+    from test_features import weather
+
+    from americast.ingest.hrrr import uncovered_plants
+
+    stored = weather("2024-06-15 06:00", leads=range(1, 3), plant_ids=(1, 2))
+    stored.to_parquet(tmp_path / "hrrr_20240615_06z.parquet")
+
+    grown = registry_fixture(
+        plant_ids=(1, 2, 3),
+        counties=("Kern", "Imperial", "Yuma"),
+        capacities=(100.0, 200.0, 150.0),
+    )
+    missing = uncovered_plants(grown, root=tmp_path)
+    assert list(missing["plant_id"]) == [3]
+
+
+def test_uncovered_plants_is_empty_when_the_store_matches(tmp_path) -> None:
+    from test_features import registry as registry_fixture
+    from test_features import weather
+
+    from americast.ingest.hrrr import uncovered_plants
+
+    weather("2024-06-15 06:00", leads=range(1, 3), plant_ids=(1, 2)).to_parquet(
+        tmp_path / "hrrr_20240615_06z.parquet"
+    )
+    same = registry_fixture(
+        plant_ids=(1, 2), counties=("Kern", "Imperial"), capacities=(100.0, 200.0)
+    )
+    assert uncovered_plants(same, root=tmp_path).empty

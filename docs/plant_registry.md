@@ -4,7 +4,7 @@ Built 2026-08-07 from EIA-860 **2025 Early Release** (published
 2026-06-09; final vintage lands September 2026) by
 `python -m americast.ingest.eia860`.
 
-Filter: state == CA, status == OP, technology == Solar
+Filter: balancing authority == CISO, status == OP, technology == Solar
 Photovoltaic. Generator-level rows aggregated to plants;
 tracking type is capacity-dominant. All 928 plants carried coordinates —
 nothing dropped.
@@ -45,3 +45,46 @@ Whether weather sampling should use CA-only plants (current registry) or
 the full CISO fleet including AZ/NV (matches what the labels measure;
 ~10% of capacity). Registry filter is one line either
 way; the schema already carries balancing_authority.
+
+
+## Rebuilt 2026-08-13: the filter is the balancing authority
+
+Gate 5 exposed the original filter as wrong in both directions. The
+label is CAISO's reported generation, and CAISO is a balancing
+authority, not a state.
+
+| | Old (`state == CA`) | New (`BA == CISO`) |
+|---|---|---|
+| Plants | 928 | 833 |
+| Capacity | 23.88 GW | **24.23 GW** |
+| CA plants outside CISO | 140 included | excluded |
+| AZ/NV plants inside CISO | excluded | **16 included, 2,478 MW** |
+
+The second row is the one that mattered. CAISO's observed peak is
+23,208 MW; the old registry's CISO slice was 21,518 MW. A fleet cannot
+generate more than its nameplate, so the ceiling was demonstrably
+describing the wrong fleet. `test_the_fleet_can_produce_what_caiso_reports`
+now pins that.
+
+**Two sources, because neither is both current and complete.**
+EIA-860M, the preliminary monthly inventory, is the spine: it says who
+is operating, at what capacity, where, and since when, about two months
+behind rather than eight. The annual Solar schedule supplies tracking,
+tilt and azimuth, which the monthly file omits and which do not change
+once a plant is built. 43 plants are too new for the annual vintage and
+take fleet-default geometry.
+
+Currency turned out to be the smaller problem: the monthly file adds
+only 221 MW of CISO solar commissioned since the annual cutoff, not the
+1–3 GW a "2–4 GW per year" rule of thumb suggests.
+
+**Arizona gets its own zone.** Clark and Nye in Nevada are Mojave Desert
+and join `mojave`. Maricopa and Yuma are Sonoran and get the summer
+monsoon, which the Mojave does not, so folding 1.8 GW of monsoon cloud
+into `mojave` would be exactly the averaging the zones exist to prevent.
+`ZONES` is now six.
+
+**This invalidates the weather store.** HRRR is sampled at plant
+coordinates and the grids are discarded, so 46 plants holding 2,714 MW
+have no weather in any stored run. `hrrr.uncovered_plants()` measures
+the gap, and it can only be closed by refetching.

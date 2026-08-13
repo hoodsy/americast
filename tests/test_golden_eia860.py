@@ -14,9 +14,12 @@ pytestmark = pytest.mark.skipif(
     not REGISTRY_PATH.exists(), reason="local plant registry not present"
 )
 
-# California bounding box, slightly padded
-LAT = (32.4, 42.1)
-LON = (-124.6, -114.1)
+# CISO's footprint, slightly padded. Not California: the balancing
+# authority reaches into Arizona and Nevada, and the registry follows
+# the authority rather than the state line. Yuma sits at -114.6, Clark
+# County at -114.9, so a California box would fail on real plants.
+LAT = (32.0, 42.1)
+LON = (-124.6, -111.5)
 
 
 @pytest.fixture(scope="module")
@@ -28,21 +31,43 @@ def test_no_null_coordinates(registry: pd.DataFrame) -> None:
     assert registry[["latitude", "longitude"]].notna().all().all()
 
 
-def test_all_plants_inside_california_box(registry: pd.DataFrame) -> None:
+def test_all_plants_inside_the_ciso_box(registry: pd.DataFrame) -> None:
     assert registry["latitude"].between(*LAT).all()
     assert registry["longitude"].between(*LON).all()
 
 
+def test_the_registry_reaches_outside_california(registry: pd.DataFrame) -> None:
+    """The correction Gate 5 forced, asserted on the real file.
+
+    CAISO's territory includes Arizona and Nevada solar, and its
+    reported number counts that generation. A registry that stopped at
+    the state line made the modelled ceiling smaller than the fleet it
+    was meant to bound.
+    """
+    outside = registry[registry["longitude"] > -114.1]
+    assert len(outside) >= 10
+    assert outside["capacity_mw_ac"].sum() > 1_500.0
+
+
 def test_golden_totals(registry: pd.DataFrame) -> None:
-    assert len(registry) == 928
+    assert len(registry) == 833
     total_gw = registry["capacity_mw_ac"].sum() / 1000
-    assert total_gw == pytest.approx(23.88, abs=0.05)
+    assert total_gw == pytest.approx(24.23, abs=0.05)
 
 
-def test_golden_ciso_share(registry: pd.DataFrame) -> None:
-    ciso = registry[registry["balancing_authority"] == "CISO"]
-    assert len(ciso) == 788
-    assert ciso["capacity_mw_ac"].sum() / 1000 == pytest.approx(21.52, abs=0.05)
+def test_every_plant_is_inside_the_balancing_authority(registry: pd.DataFrame) -> None:
+    """No slice needed any more: the filter is the balancing authority."""
+    assert (registry["balancing_authority"] == "CISO").all()
+
+
+def test_the_fleet_can_produce_what_caiso_reports(registry: pd.DataFrame) -> None:
+    """The check that would have caught the original bug.
+
+    CAISO's observed peak is 23.2 GW. A registry whose whole nameplate
+    sits below that is describing a fleet too small to have produced the
+    label, whatever else it gets right.
+    """
+    assert registry["capacity_mw_ac"].sum() > 23_300.0
 
 
 def test_single_axis_dominates(registry: pd.DataFrame) -> None:

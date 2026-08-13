@@ -41,7 +41,7 @@ INDEX_COLUMNS = (*HOUR_KEYS, "lead_hours")
 def fleet(plants: pd.DataFrame) -> pd.DataFrame:
     """The plants we model: CISO only, each labeled with its weather zone.
 
-    plants is the PLANTS_CA registry frame; this reads balancing_authority
+    plants is the PLANTS_CISO registry frame; this reads balancing_authority
     and county, and returns the same columns plus `zone`.
 
     An unmapped county raises. A silent "unknown" bucket would hide next

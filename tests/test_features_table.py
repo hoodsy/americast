@@ -5,15 +5,17 @@ from test_features import registry, weather
 
 from americast.features.table import build, load, verify, write
 from americast.region import CAISO_CA
-from americast.schemas import HRRR_WEATHER, PLANTS_CA, TRAIN_TABLE
+from americast.schemas import HRRR_WEATHER, PLANTS_CISO, TRAIN_TABLE
 
 # One plant per zone, because the training table's schema declares
 # every zone's weather non-nullable — a fleet missing a zone cannot be
 # written at all, which `test_an_absent_zone_cannot_be_written` pins.
+# Yuma is the sonoran zone, and it is Arizona: CISO reaches outside
+# California, so the fixture fleet has to as well.
 ALL_ZONES = {
-    "plant_ids": (1, 2, 3, 4, 5),
-    "counties": ("Kern", "Imperial", "Fresno", "Riverside", "Monterey"),
-    "capacities": (100.0, 200.0, 50.0, 300.0, 20.0),
+    "plant_ids": (1, 2, 3, 4, 5, 6),
+    "counties": ("Kern", "Imperial", "Fresno", "Riverside", "Monterey", "Yuma"),
+    "capacities": (100.0, 200.0, 50.0, 300.0, 20.0, 150.0),
 }
 
 
@@ -67,7 +69,7 @@ def test_the_weather_fixture_matches_the_real_schema() -> None:
 def test_the_registry_fixture_matches_the_real_schema() -> None:
     """The gap this closes cost an afternoon: plant_name was missing."""
     frame = registry()
-    for field in PLANTS_CA:
+    for field in PLANTS_CISO:
         assert field.name in frame.columns, f"fixture is missing {field.name}"
 
 

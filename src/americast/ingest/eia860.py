@@ -1,14 +1,34 @@
-"""EIA-860 ingestion: the California utility-scale solar plant registry.
+"""EIA-860 ingestion: the CAISO utility-scale solar plant registry.
 
-EIA-860 is the federal annual census of US generators (>= 1 MW): location,
-capacity, status, and for solar, tracking type. Published as Excel
-workbooks, refreshed once a year — so this ingest is "download, build,
-done" rather than a daily feed. We use the 2025 Early Release
-(published 2026-06-09; final expected September 2026).
+EIA-860 is the federal census of US generators (>= 1 MW): location,
+capacity, status, and for solar, tracking type. Two vintages are read,
+because neither one alone is both current and complete.
 
-The Solar schedule is generator-level (large plants file several phases);
-build_registry aggregates to one row per plant and joins coordinates,
-county, and balancing authority from the Plant schedule.
+**EIA-860M**, the preliminary monthly inventory, is the spine. It says
+which plants are operating right now, at what capacity, where, and since
+when. It runs about two months behind rather than the annual file's
+eight.
+
+**The annual Solar schedule** supplies what the monthly file omits:
+tracking type, tilt and azimuth. Array geometry does not change once a
+plant is built, so reading it from an older vintage costs nothing. A
+plant too new to appear in the annual file takes the fleet defaults
+below.
+
+## The filter is the balancing authority, not the state
+
+This is the correction that Gate 5 forced, and it runs in both
+directions. The label is CAISO's reported generation, and CAISO is a
+balancing authority whose territory reaches into Arizona and Nevada. A
+`state == CA` filter therefore did two wrong things at once: it admitted
+140 Californian plants in LDWP, IID, BANC, PacifiCorp and WALC whose
+output never reaches CAISO's number, and it excluded 2,478 MW of
+Arizona and Nevada solar whose output does.
+
+The second error was the expensive one. It made the modelled clear-sky
+ceiling smaller than the fleet it was meant to bound, so CAISO's real
+peak of 23,208 MW sat above the whole modelled fleet. See docs/model.md
+for what that did to the confidence band.
 """
 
 import os
@@ -20,14 +40,32 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from americast.schemas import PLANTS_CA
+from americast.features.county import CISO_BA
+from americast.schemas import PLANTS_CISO
 
 EIA860_URL = "https://www.eia.gov/electricity/data/eia860/xls/eia8602025ER.zip"
+
+# Pinned, like the annual URL. EIA publishes one of these a month and
+# keeps the old ones, so naming the vintage makes a rebuild reproduce
+# rather than quietly drift. Bump it, rebuild, and re-read the capacity
+# line the run prints.
+EIA860M_URL = (
+    "https://www.eia.gov/electricity/data/eia860m/xls/june_generator2026.xlsx"
+)
+
 RAW_DIR = Path("data/eia860")
-REGISTRY_PATH = Path("data/registry/plants_ca.parquet")
+REGISTRY_PATH = Path("data/registry/plants_ciso.parquet")
 
 _PLANT_XLSX = "2___Plant_Y2025_Early_Release.xlsx"
 _SOLAR_XLSX = "3_3_Solar_Y2025_Early_Release.xlsx"
+_MONTHLY_SHEET = "Operating"
+
+# EIA spells the status "(OP) Operating" in the monthly file. The same
+# sheet also carries "(OS)" and "(OA)" — out of service, one of them
+# expected back. Neither generates today, and the label only counts what
+# generated.
+_OPERATING = "(OP)"
+_SOLAR_PV = "Solar Photovoltaic"
 
 # Stand-ins for the few generators EIA left blank. Every one of them is
 # measured from the California operating fleet in this same vintage, so
@@ -62,6 +100,15 @@ def download_raw(raw_dir: Path = RAW_DIR) -> Path:
     return extracted
 
 
+def download_monthly(raw_dir: Path = RAW_DIR) -> Path:
+    """Download the monthly inventory workbook; skips work already done."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    path = raw_dir / Path(EIA860M_URL).name
+    if not path.exists():
+        urllib.request.urlretrieve(EIA860M_URL, path)
+    return path
+
+
 def load_sheets(extracted: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Read the Plant and Solar schedules (headers live on sheet row 3)."""
     plant = pd.read_excel(extracted / _PLANT_XLSX, skiprows=2)
@@ -69,35 +116,51 @@ def load_sheets(extracted: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     return plant, solar
 
 
-def build_registry(plant: pd.DataFrame, solar: pd.DataFrame) -> pd.DataFrame:
-    """One row per operating CA utility-scale solar PV plant.
+def load_monthly(path: Path) -> pd.DataFrame:
+    """Read the monthly inventory's Operating sheet.
 
-    Filters the generator-level Solar schedule (state CA, status OP,
-    technology Solar Photovoltaic), sums AC and DC capacity per plant,
-    picks the capacity-dominant tracking type and the array geometry
-    that goes with it, dates the plant from its first phase, then joins
-    location facts from the Plant schedule.
+    Same layout convention as the annual workbooks: the header is on
+    sheet row 3. The last rows carry EIA's source note rather than
+    generators, and they arrive with a null Plant ID, so they are cut
+    here rather than surviving as a plant called NaN.
     """
-    gens = solar[
-        (solar["State"] == "CA")
-        & (solar["Status"] == "OP")
-        & (solar["Technology"] == "Solar Photovoltaic")
+    frame = pd.read_excel(path, sheet_name=_MONTHLY_SHEET, skiprows=2)
+    return frame[frame["Plant ID"].notna()].copy()
+
+
+def build_registry(solar: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
+    """One row per operating CAISO utility-scale solar PV plant.
+
+    The monthly inventory decides who is in the fleet and supplies
+    capacity, location and date. The annual Solar schedule supplies
+    array geometry, joined on plant id, because the monthly file does
+    not carry it.
+
+    Geometry is a left join on purpose. A plant that appears in the
+    monthly file and not in the annual one is a plant built since the
+    annual vintage — real, generating, and with no reported tilt. It
+    takes the fleet defaults, which is a better answer than dropping
+    2,478 MW of desert because a spreadsheet is eight months old.
+    """
+    gens = monthly[
+        (monthly["Balancing Authority Code"] == CISO_BA)
+        & (monthly["Technology"] == _SOLAR_PV)
+        & (monthly["Status"].astype("str").str.startswith(_OPERATING))
     ].copy()
-    gens["tracking"] = _tracking_type(gens)
     gens["dc_mw"] = _dc_capacity(gens)
 
-    grouped = gens.groupby("Plant Code")
-    totals = grouped.agg(
-        capacity_mw_ac=("Nameplate Capacity (MW)", "sum"),
-        dc_capacity_mw=("dc_mw", "sum"),
-    ).reset_index()
-    layout = _layout(gens)
-    online = _first_online(gens)
-    per_plant = totals.merge(layout, on="Plant Code").merge(online, on="Plant Code")
-
-    location = plant[
+    totals = (
+        gens.groupby("Plant ID")
+        .agg(
+            capacity_mw_ac=("Nameplate Capacity (MW)", "sum"),
+            dc_capacity_mw=("dc_mw", "sum"),
+        )
+        .reset_index()
+    )
+    online = _first_online(gens, key="Plant ID")
+    location = gens.drop_duplicates("Plant ID")[
         [
-            "Plant Code",
+            "Plant ID",
             "Plant Name",
             "Latitude",
             "Longitude",
@@ -105,11 +168,15 @@ def build_registry(plant: pd.DataFrame, solar: pd.DataFrame) -> pd.DataFrame:
             "Balancing Authority Code",
         ]
     ]
-    merged = per_plant.merge(location, on="Plant Code", how="left")
+    merged = totals.merge(online, on="Plant ID").merge(location, on="Plant ID")
+
+    geometry = _geometry(solar, set(merged["Plant ID"]))
+    merged = merged.merge(geometry, on="Plant ID", how="left")
+    merged["tracking"] = merged["tracking"].fillna("unknown")
 
     out = pd.DataFrame(
         {
-            "plant_id": merged["Plant Code"].astype("int64"),
+            "plant_id": merged["Plant ID"].astype("int64"),
             "plant_name": merged["Plant Name"].astype("str"),
             "latitude": pd.to_numeric(merged["Latitude"], errors="coerce"),
             "longitude": pd.to_numeric(merged["Longitude"], errors="coerce"),
@@ -126,6 +193,24 @@ def build_registry(plant: pd.DataFrame, solar: pd.DataFrame) -> pd.DataFrame:
         }
     )
     return out.sort_values("plant_id").reset_index(drop=True)
+
+
+def _geometry(solar: pd.DataFrame, plant_ids: set) -> pd.DataFrame:
+    """Tracking, tilt and azimuth per plant, from the annual schedule.
+
+    Array geometry is fixed at construction, so an eight-month-old
+    reading of it is as good as a fresh one. Keyed to `Plant ID` to
+    match the monthly file's column name.
+    """
+    gens = solar[
+        solar["Plant Code"].isin(plant_ids)
+        & (solar["Status"] == "OP")
+        & (solar["Technology"] == _SOLAR_PV)
+    ].copy()
+    if gens.empty:
+        return pd.DataFrame(columns=["Plant ID", "tracking", "tilt", "azimuth"])
+    gens["tracking"] = _tracking_type(gens)
+    return _layout(gens).rename(columns={"Plant Code": "Plant ID"})
 
 
 def _tracking_type(gens: pd.DataFrame) -> pd.Series:
@@ -191,7 +276,7 @@ def _layout(gens: pd.DataFrame) -> pd.DataFrame:
     return biggest[["Plant Code", "tracking", "tilt", "azimuth"]]
 
 
-def _first_online(gens: pd.DataFrame) -> pd.DataFrame:
+def _first_online(gens: pd.DataFrame, key: str = "Plant Code") -> pd.DataFrame:
     """The month a plant's first phase started generating, in UTC.
 
     Only 79.7% of today's California solar capacity was running at the
@@ -215,9 +300,9 @@ def _first_online(gens: pd.DataFrame) -> pd.DataFrame:
     )
     dates = pd.to_datetime(parts, errors="coerce")
     frame = pd.DataFrame(
-        {"Plant Code": gens["Plant Code"], "operating_date": dates.dt.tz_localize("UTC")}
+        {key: gens[key], "operating_date": dates.dt.tz_localize("UTC")}
     )
-    return frame.groupby("Plant Code", as_index=False)["operating_date"].min()
+    return frame.groupby(key, as_index=False)["operating_date"].min()
 
 
 def _reported_tilt(merged: pd.DataFrame) -> pd.Series:
@@ -259,22 +344,59 @@ def write_registry(df: pd.DataFrame, path: Path = REGISTRY_PATH) -> None:
     guaranteed to share by sitting in the same directory.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pandas(df, schema=PLANTS_CA, preserve_index=False)
+    table = pa.Table.from_pandas(df, schema=PLANTS_CISO, preserve_index=False)
     staged = path.with_suffix(".parquet.tmp")
     pq.write_table(table, staged)
     os.replace(staged, path)
 
 
+def verify(registry: pd.DataFrame) -> dict:
+    """What the schema cannot express: is this the fleet CAISO reports?
+
+    - `non_ciso`: plants outside the balancing authority. Any is a bug;
+      their output never enters the label.
+    - `by_state`: capacity per state. Arizona and Nevada appearing here
+      is the point of the balancing-authority filter, not a fault.
+    - `default_geometry`: plants too new for the annual schedule, which
+      therefore carry fleet-default tilt and azimuth.
+    - `unknown_county`: counties `features.county` cannot map to a zone.
+      `fleet()` raises on these, so this is the earlier, kinder warning.
+    """
+    from americast.features.county import COUNTY_ZONE
+
+    counties = registry["county"].str.lower()
+    return {
+        "n_plants": len(registry),
+        "capacity_gw": registry["capacity_mw_ac"].sum() / 1000.0,
+        "non_ciso": int((registry["balancing_authority"] != CISO_BA).sum()),
+        "default_geometry": int((registry["tracking"] == "unknown").sum()),
+        "unknown_county": sorted(set(counties) - set(COUNTY_ZONE)),
+        "newest_plant": registry["operating_date"].max(),
+        "missing_coordinates": int(
+            registry[["latitude", "longitude"]].isna().any(axis=1).sum()
+        ),
+    }
+
+
 if __name__ == "__main__":
-    plant, solar = load_sheets(download_raw())
-    registry = build_registry(plant, solar)
+    _, solar = load_sheets(download_raw())
+    monthly = load_monthly(download_monthly())
+    registry = build_registry(solar, monthly)
+
     dropped = registry[registry[["latitude", "longitude"]].isna().any(axis=1)]
     if not dropped.empty:
         print(f"dropping {len(dropped)} plants with missing coordinates:")
         print(dropped[["plant_id", "plant_name", "capacity_mw_ac"]].to_string())
         registry = registry.dropna(subset=["latitude", "longitude"])
-    write_registry(registry.reset_index(drop=True))
+
+    registry = registry.reset_index(drop=True)
+    write_registry(registry)
+    audit = verify(registry)
     print(
-        f"registry written: {len(registry)} plants, "
-        f"{registry['capacity_mw_ac'].sum() / 1000:.2f} GW AC → {REGISTRY_PATH}"
+        f"registry written: {audit['n_plants']} plants, "
+        f"{audit['capacity_gw']:.2f} GW AC → {REGISTRY_PATH}"
     )
+    print(f"  newest plant     {audit['newest_plant']:%Y-%m}")
+    print(f"  default geometry {audit['default_geometry']} plants")
+    if audit["unknown_county"]:
+        print(f"  UNMAPPED COUNTIES: {audit['unknown_county']}")

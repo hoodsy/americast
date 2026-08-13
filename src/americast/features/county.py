@@ -10,9 +10,19 @@ CISO_BA = "CISO"
 # the Sierra foothill counties (Placer, El Dorado, Amador, Tuolumne)
 # plus Lassen are filed under central_valley for want of a better home.
 # Both are under 25 MW except San Luis Obispo.
+#
+# CISO reaches outside California, and so does this map. Clark and Nye
+# in Nevada are Mojave Desert on the same side of the same mountains as
+# Inyo and San Bernardino, so they join `mojave`. Arizona's Maricopa and
+# Yuma are not: they are Sonoran, and they get the summer monsoon —
+# July-to-September thunderstorms that never reach the Mojave. Folding
+# 1.8 GW of monsoon-season cloud into a zone that has none is exactly
+# the averaging the zones exist to prevent, so `sonoran` is its own
+# zone.
 ZONE_COUNTIES = {
     "kern": ("Kern",),
-    "mojave": ("Riverside", "San Bernardino", "Los Angeles", "Inyo"),
+    "mojave": ("Riverside", "San Bernardino", "Los Angeles", "Inyo", "Clark", "Nye"),
+    "sonoran": ("Maricopa", "Yuma"),
     "imperial": ("Imperial", "San Diego"),
     "central_valley": (
         "Fresno",
@@ -50,12 +60,18 @@ ZONE_COUNTIES = {
         "Napa",
         "Sonoma",
         "Humboldt",
+        "Mendocino",
         "Orange",
     ),
 }
 
 # Inverted once at import: lowercase county -> zone. Lowercase because
 # EIA-860 spells one Kern row "KERN".
+#
+# Keyed on county alone, not on (state, county). That is safe only
+# because no county name here occurs in two of the four states CISO
+# reaches, which `test_no_county_name_is_ambiguous` pins. If CISO ever
+# reaches a fifth state, check before adding to this map.
 COUNTY_ZONE = {}
 for _zone, _counties in ZONE_COUNTIES.items():
     for _county in _counties:

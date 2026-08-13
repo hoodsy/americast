@@ -21,5 +21,5 @@ CAISO_CA = RegionConfig(
     name="CAISO_CA",
     timezone="America/Los_Angeles",
     iso="CAISO",
-    plant_registry_path=Path("data/registry/plants_ca.parquet"),
+    plant_registry_path=Path("data/registry/plants_ciso.parquet"),
 )

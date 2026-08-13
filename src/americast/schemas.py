@@ -73,7 +73,7 @@ HRRR_WEATHER = pa.schema(
 # operating_date is the month the plant's first phase started
 # generating, stored so historical aggregation can drop plants that did
 # not exist yet.
-PLANTS_CA = pa.schema(
+PLANTS_CISO = pa.schema(
     [
         pa.field("plant_id", pa.int64(), nullable=False),
         pa.field("plant_name", pa.string(), nullable=False),

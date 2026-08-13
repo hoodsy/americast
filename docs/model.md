@@ -181,11 +181,22 @@ model learned the first number and was graded against the second.**
 That is the whole of its −405 MW bias, and it is why the unfitted
 physics, having learned nothing, is nearly unbiased instead at −89 MW.
 
-The cause is in the registry. Its newest plant is dated **2025-12**,
-so every plant commissioned during the test period generates real
-megawatts and contributes no ceiling. CAISO's own peak already exceeds
-the registry's CISO nameplate, which is why golden tests bound
-predictions by the observed label rather than by installed capacity.
+The cause is in the registry, and it has two parts of very different
+size. Both were found after this gate was first written; the numbers
+above were measured against the old registry and are superseded by the
+rebuild described in `plant_registry.md`.
+
+**The ceiling was too low in every period, including training.** The
+registry filtered on `state == CA`, but CAISO is a balancing authority
+that reaches into Arizona and Nevada. That excluded 2,478 MW whose
+output is in the label. CAISO beat the modelled ceiling on 45% of
+summer daylight hours as far back as 2023 — a constant shortfall, which
+a model absorbs rather than trips over.
+
+**A second, growing shortfall did the damage.** The annual filing's
+newest plant was dated 2025-12, so plants commissioned during the test
+period generated real megawatts and contributed no ceiling. Only a
+changing error biases a model, and this is the one that changed.
 
 This is a stale input, not a retuning problem. Refitting a constant
 against the test period would remove the bias and would also be the

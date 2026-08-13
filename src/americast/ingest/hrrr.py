@@ -325,6 +325,33 @@ def pilot(root: Path = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
     return fetched
 
 
+def uncovered_plants(
+    plants: pd.DataFrame, root: Path = HRRR_DIR
+) -> pd.DataFrame:
+    """Registry plants the weather store has never sampled.
+
+    The store holds one row per (run, forecast hour, plant), sampled at
+    the coordinates the registry held when the run was fetched. Add a
+    plant to the registry and no amount of rebuilding produces weather
+    for it — the grids were discarded, so the only way to sample a new
+    coordinate is to download the run again.
+
+    That makes this the check that has to run after every registry
+    change. A silent gap does not raise anywhere: `aggregate` inner-joins
+    weather to plants, so a plant with no weather simply weighs nothing,
+    and the fleet quietly shrinks back to whatever the store happens to
+    cover.
+
+    Reads one stored run rather than all of them, because every run
+    carries the same plant set.
+    """
+    stored = sorted(root.glob("hrrr_*.parquet"))
+    if not stored:
+        return plants.copy()
+    sampled = set(pd.read_parquet(stored[-1], columns=["plant_id"])["plant_id"])
+    return plants[~plants["plant_id"].isin(sampled)].copy()
+
+
 def read_manifest(root: Path = HRRR_DIR) -> pd.DataFrame:
     """The record of every attempted run. Empty frame when none yet."""
     path = manifest_path(root)
