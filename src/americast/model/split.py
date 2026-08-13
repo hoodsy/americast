@@ -85,13 +85,18 @@ def design(table: pd.DataFrame) -> pd.DataFrame:
     Division by zero is left as an infinity here rather than being
     filled. Every consumer downstream cuts on `fleet_clear_mw` first, so
     a fill would only hide a night row that escaped the cut.
+
+    The target is added only when a label is present. A live forecast
+    has no `solar_mw` — tomorrow has not happened — and it still needs
+    every feature column. Training reads `ratio`; inference never does.
     """
     out = table.copy()
     for zone in (*ZONES, "fleet"):
         ceiling = out[f"{zone}_clear_mw"]
         lit = ceiling > 0.0
         out[f"{zone}_clearness"] = (out[f"{zone}_ac_mw"] / ceiling).where(lit, 0.0)
-    out[TARGET] = out["solar_mw"] / out[SCALE]
+    if "solar_mw" in out.columns:
+        out[TARGET] = out["solar_mw"] / out[SCALE]
     return out
 
 

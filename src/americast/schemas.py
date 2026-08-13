@@ -46,6 +46,52 @@ CAISO_CURTAILMENT = pa.schema(
     ]
 )
 
+# The live forecast store: what the model published, before anyone
+# knows whether it was right.
+#
+# One row per (run_time, valid_time), appended once a day and never
+# rewritten. That is the whole point of the file — a forecast that can
+# be edited after the fact is not a forecast, and a scoreboard built on
+# one is not evidence. `grade_daily` reads these rows and writes its
+# verdict elsewhere.
+#
+# lead_hours runs 1 to 47, not 48: features.hourly averages each
+# instant with the next one to match the label's hour-mean convention,
+# so the final forecast hour has no successor and is dropped.
+LIVE_FORECASTS = pa.schema(
+    [
+        pa.field("run_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("valid_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("lead_hours", pa.int32(), nullable=False),
+        pa.field("p10_mw", pa.float64(), nullable=False),
+        pa.field("p50_mw", pa.float64(), nullable=False),
+        pa.field("p90_mw", pa.float64(), nullable=False),
+        pa.field("fleet_ac_mw", pa.float64(), nullable=False),
+        pa.field("fleet_clear_mw", pa.float64(), nullable=False),
+    ]
+)
+
+# The scoreboard: yesterday's forecasts joined to what happened.
+#
+# Separate from LIVE_FORECASTS so that grading can be re-run — a label
+# arriving late, or a CAISO revision — without ever touching the
+# forecast that was published. error_mw is signed, p50 minus actual, so
+# a positive value is an over-prediction. inside_band answers the only
+# question the confidence interval makes: did the truth land in it.
+LIVE_SCORES = pa.schema(
+    [
+        pa.field("run_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("valid_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("lead_hours", pa.int32(), nullable=False),
+        pa.field("p10_mw", pa.float64(), nullable=False),
+        pa.field("p50_mw", pa.float64(), nullable=False),
+        pa.field("p90_mw", pa.float64(), nullable=False),
+        pa.field("solar_mw", pa.float64(), nullable=False),
+        pa.field("error_mw", pa.float64(), nullable=False),
+        pa.field("inside_band", pa.bool_(), nullable=False),
+    ]
+)
+
 # EIA-923 monthly net generation, solar plants only.
 #
 # The only per-plant truth this project has. CAISO publishes one number

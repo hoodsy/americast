@@ -61,7 +61,7 @@ def build(
     if not runs:
         raise FileNotFoundError(f"no HRRR runs in {hrrr_dir}")
 
-    rows = [_one_run(pd.read_parquet(path), plants, region) for path in runs]
+    rows = [one_run(pd.read_parquet(path), plants, region) for path in runs]
     stacked = pd.concat(rows, ignore_index=True)
     labelled = _attach_label(stacked, label)
     return attach(labelled, region)
@@ -115,10 +115,15 @@ def verify(table: pd.DataFrame) -> dict:
     }
 
 
-def _one_run(
+def one_run(
     weather: pd.DataFrame, plants: pd.DataFrame, region: RegionConfig
 ) -> pd.DataFrame:
     """One run file -> its forecast hours, aligned and complete.
+
+    Public because the daily loop featurizes exactly one run and must
+    do it identically to the training table. Two copies of this
+    ordering would drift, and the drift would be invisible: the columns
+    would still be there, holding subtly different numbers.
 
     The order matters. Aggregation comes first because it is far
     cheaper on 37,824 rows than on the table, and averaging is linear,

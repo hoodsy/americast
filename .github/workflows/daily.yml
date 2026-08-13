@@ -1,0 +1,70 @@
+name: daily
+
+# 09:00 UTC is 06z plus three hours: the HRRR archive needs about
+# ninety minutes to finish uploading a run, and `run_daily.latest`
+# refuses anything younger than two. Firing earlier would fetch a
+# half-written run and publish a forecast with holes in it.
+#
+# Grading runs in the same job, after the forecast. It scores whatever
+# the label store has reached, which on any given morning is yesterday
+# — CAISO's fuel mix lands within the hour, but the run being graded is
+# always at least a day old.
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+# One at a time. Two overlapping runs would both read the store, both
+# append, and the second write would drop the first one's rows.
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync
+
+      # The stores are the state this loop carries between days. They
+      # are restored by prefix so a failed run never loses history: the
+      # newest matching cache wins, and today's key is written fresh.
+      - name: Restore live stores
+        uses: actions/cache/restore@v4
+        with:
+          path: data/live
+          key: live-${{ github.run_id }}
+          restore-keys: live-
+
+      - name: Fetch labels
+        run: uv run python -m americast.ingest.caiso
+
+      - name: Forecast
+        run: uv run python -m americast.daily.run_daily
+
+      - name: Grade
+        run: uv run python -m americast.daily.grade_daily
+
+      - name: Save live stores
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/live
+          key: live-${{ github.run_id }}
+
+      # The JSON contract, as an artifact the frontend can fetch and a
+      # human can inspect after a bad morning.
+      - name: Upload contract
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: forecast-json
+          path: |
+            data/live/forecast.json
+            data/live/scoreboard.json
+          retention-days: 90
