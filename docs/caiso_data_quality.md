@@ -40,3 +40,51 @@ The store's last day trails "now" by a few hours: CAISO's history CSV for
 the current day is published with a lag. Harmless — backfill always
 refetches the most recent stored day, and the daily forecast loop reads
 the live feed instead.
+
+## Curtailment: the sunlight the grid refused
+
+`data/caiso/curtailment_hourly.parquet` — hourly solar curtailment,
+2023-01-01 to present, 19,557 rows, 13,652 GWh withheld in total.
+
+The fuel mix measures what the grid *accepted*. The physical model
+estimates what the panels *could produce*. Curtailment is the
+difference, and it is an economic decision no irradiance model can see.
+
+```sh
+uv run python -m americast.ingest.curtailment 2023-01-01 2026-08-12
+```
+
+Two report formats, and two traps in them.
+
+**gridstatus returns the legacy columns as strings.** Summing object
+dtype concatenates digits instead of adding them, so `"17"` and `"8"`
+become 178. That produced 30,251 MW of curtailment for one July day —
+more than the whole fleet, which is the only reason it was caught.
+`verify()` now fails any hour above 30 GW.
+
+**The peak-MW column is not comparable across the formats.** The legacy
+report sometimes gives an hour's energy with a blank power reading, so
+summing categories yields an hour whose "peak" sits below its own mean.
+Only the energy figure is stored; it is a mean power over a one-hour
+interval, directly addable to the hourly label.
+
+### What it showed, and what it did not
+
+Adding curtailment back to the label makes the unfitted physical model
+**almost exactly right in 2023**: median `(solar + curtailed) / physics`
+is **1.0021**. That is a strong independent validation of the whole
+per-plant chain.
+
+It does **not** explain the drift. The residual climbs +8.0% from 2023
+to 2025 whether curtailment is added back or not — the correction moves
+the level, never the slope. Curtailment runs at a near-constant 5.7-6.2%
+of predicted output across 2023-2025.
+
+| Year | resid | resid + curtailment | curtailed share |
+|---|---|---|---|
+| 2023 | 0.9469 | **1.0021** | 5.7% |
+| 2024 | 0.9882 | 1.0531 | 6.1% |
+| 2025 | 1.0229 | 1.0824 | 6.2% |
+
+So the physics was right in 2023 and under-predicts by 8% by 2025. See
+`model.md` for what is still unexplained.

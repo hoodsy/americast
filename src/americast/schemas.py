@@ -19,6 +19,33 @@ CAISO_SOLAR_5MIN = pa.schema(
     ]
 )
 
+# CAISO's published wind-and-solar curtailment, solar only, hourly.
+#
+# utc_time is the interval start, matching the hourly label. Curtailed
+# solar is sunlight the plants could have converted and were instructed
+# not to — it never reaches the fuel mix, so it is absent from
+# CAISO_SOLAR_5MIN by construction. `solar_mw + curtailed_mw` is
+# therefore what the fleet would have produced if the grid had taken
+# everything it offered, which is the quantity the physical model
+# actually estimates.
+#
+# curtailed_mw comes from CAISO's MWh column over a one-hour interval,
+# so it is a mean power like every other value in this project.
+#
+# CAISO's second column, an instantaneous peak reduction, is
+# deliberately not stored. The legacy report leaves it blank on some
+# System-reason rows while still reporting the energy, so summing
+# categories gives an hour whose "peak" is below its own mean. A column
+# that is trustworthy after mid-2025 and not before is a column holding
+# two definitions, and the energy figure is the only one this project
+# can add to a label.
+CAISO_CURTAILMENT = pa.schema(
+    [
+        pa.field("utc_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("curtailed_mw", pa.float64(), nullable=False),
+    ]
+)
+
 # HRRR forecast fields extracted at plant locations. One row per
 # (run_time, forecast hour, plant). Native GRIB units stored — dswrf,
 # dni and dhi W/m², tcdc %, t2m Kelvin, w10m m/s — unit conversion
