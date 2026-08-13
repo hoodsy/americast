@@ -38,11 +38,12 @@ from americast.daily.run_daily import load as load_forecasts
 from americast.features.baselines import DAYLIGHT_MW
 from americast.ingest.caiso import STORE_PATH as CAISO_STORE
 from americast.ingest.caiso import to_hourly
+from americast.region import CAISO_CA
 from americast.schemas import LIVE_SCORES
 
 STORE_PATH = storage.key("live/scores.parquet")
 # Under the public prefix: this is the object a browser fetches.
-JSON_PATH = storage.public("scoreboard.json")
+JSON_PATH = storage.public(f"{CAISO_CA.id}/scoreboard.json")
 
 # Twelve 5-minute readings make a whole hour. Fewer is a different
 # measurement, not a worse one.
@@ -173,7 +174,7 @@ def to_json(scores: pd.DataFrame, days: int = ROLLING_DAYS) -> dict:
         n=("error_mw", "size"),
     )
     return {
-        "region": "CAISO_CA",
+        "region": {"id": CAISO_CA.id, "name": CAISO_CA.name},
         "units": "MW",
         "rolling": {
             key: (value.isoformat() if hasattr(value, "isoformat") else value)

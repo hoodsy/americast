@@ -53,8 +53,15 @@ from americast.region import CAISO_CA, RegionConfig
 from americast.schemas import LIVE_FORECASTS
 
 STORE_PATH = storage.key("live/forecasts.parquet")
-# Under the public prefix: this is the object a browser fetches.
-JSON_PATH = storage.public("forecast.json")
+# Under the public prefix, filed by region id: this is the object a
+# browser fetches. The region segment is here from the first day rather
+# than added later, because these are public URLs and moving one breaks
+# every client that saved it.
+JSON_PATH = storage.public(f"{CAISO_CA.id}/forecast.json")
+INDEX_PATH = storage.public("regions.json")
+
+# Bumped only when a consumer would break. Additive fields do not.
+SCHEMA_VERSION = 1
 
 # The run hour the model was trained on, and the one that spans two
 # whole Pacific days. See the module docstring.
@@ -161,7 +168,12 @@ def load(path: Path | str = STORE_PATH) -> pd.DataFrame:
     return storage.read_parquet(path)
 
 
-def to_json(frame: pd.DataFrame) -> dict:
+def to_json(
+    frame: pd.DataFrame,
+    region: RegionConfig = CAISO_CA,
+    accuracy: dict | None = None,
+    generated_at: pd.Timestamp | None = None,
+) -> dict:
     """The frozen contract the frontend consumes.
 
     Parallel arrays, not an array of objects, matching the map API's
@@ -174,25 +186,108 @@ def to_json(frame: pd.DataFrame) -> dict:
     """
     latest_run = frame["run_time"].max()
     current = frame[frame["run_time"] == latest_run].sort_values("valid_time")
+    stamped = generated_at or pd.Timestamp(datetime.now(tz=UTC))
+    peak_row = current.loc[current["p50_mw"].idxmax()]
+
     return {
+        "schema_version": SCHEMA_VERSION,
+        "region": _region_block(region),
+        "units": "MW",
+        "level": "state",
+        "validated": region.graded,
         "run_time": latest_run.isoformat(),
+        "generated_at": stamped.isoformat(),
         "valid_times": [stamp.isoformat() for stamp in current["valid_time"]],
         "lead_hours": current["lead_hours"].astype(int).tolist(),
-        "p10_mw": current["p10_mw"].round(1).tolist(),
         "p50_mw": current["p50_mw"].round(1).tolist(),
+        "p10_mw": current["p10_mw"].round(1).tolist(),
         "p90_mw": current["p90_mw"].round(1).tolist(),
         "physical_mw": current["fleet_ac_mw"].round(1).tolist(),
         "clear_sky_mw": current["fleet_clear_mw"].round(1).tolist(),
-        "units": "MW",
-        "level": "state",
-        "validated": True,
-        "region": CAISO_CA.name,
+        "peak": {
+            "valid_time": peak_row["valid_time"].isoformat(),
+            "p50_mw": round(float(peak_row["p50_mw"]), 1),
+        },
+        "accuracy": accuracy,
+    }
+
+
+def _region_block(region: RegionConfig) -> dict:
+    """How a region identifies itself to a consumer.
+
+    An object rather than a bare string. A national map needs a display
+    name, a timezone to render local hours, and — above all — whether
+    the forecast is graded, because a region with no public actuals feed
+    is a different product from one that publishes its own error.
+    """
+    return {
+        "id": region.id,
+        "name": region.name,
+        "kind": region.kind,
+        "timezone": region.timezone,
+        "graded": region.graded,
+    }
+
+
+def index(regions: list[RegionConfig] | None = None, generated_at=None) -> dict:
+    """The catalogue: what exists and where to fetch it.
+
+    Lets a client draw a picker or a map without fetching every
+    region's payload. One entry today; the shape is what matters.
+    """
+    stamped = generated_at or pd.Timestamp(datetime.now(tz=UTC))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": stamped.isoformat(),
+        "regions": [
+            {
+                **_region_block(region),
+                "forecast": f"{region.id}/forecast.json",
+                "scoreboard": f"{region.id}/scoreboard.json",
+            }
+            for region in (regions or [CAISO_CA])
+        ],
+    }
+
+
+def publish_index(path: Path | str = INDEX_PATH) -> None:
+    """Write the catalogue beside the regions it lists."""
+    storage.write_text(path, json.dumps(index(), indent=2))
+
+
+def recent_accuracy(days: int = 30) -> dict | None:
+    """The rolling error, read from the scoreboard the grader wrote.
+
+    Embedded in the forecast so the number always travels with the
+    thing it describes: a reader sees today's curve and how wrong last
+    month's curves were, together, on one request. Most published solar
+    forecasts do not show this, and it is the part of this project worth
+    publishing.
+
+    Returns None before the first grading, which is a real state on day
+    one and must not be faked with zeroes.
+    """
+    from americast.daily import grade_daily
+
+    if not storage.exists(grade_daily.STORE_PATH):
+        return None
+    summary = grade_daily.rolling(grade_daily.load(), days=days)
+    if not summary.get("n"):
+        return None
+    return {
+        "window_days": summary["days"],
+        "mae_mw": round(summary["mae_mw"], 1),
+        "bias_mw": round(summary["bias_mw"], 1),
+        "coverage": round(summary["coverage"], 3),
+        "graded_hours": summary["n"],
     }
 
 
 def publish(frame: pd.DataFrame, path: Path | str = JSON_PATH) -> None:
     """Write the JSON contract."""
-    storage.write_text(path, json.dumps(to_json(frame), indent=2))
+    storage.write_text(
+        path, json.dumps(to_json(frame, accuracy=recent_accuracy()), indent=2)
+    )
 
 
 def verify(frame: pd.DataFrame) -> dict:
@@ -230,6 +325,7 @@ if __name__ == "__main__":
     published = forecast(run_time, models)
     gained = append(published)
     publish(load())
+    publish_index()
 
     audit = verify(published)
     print(f"forecast for {run_time:%Y-%m-%d %H}z -> {STORE_PATH}")
@@ -237,3 +333,4 @@ if __name__ == "__main__":
     print(f"  span {audit['span'][0]} to {audit['span'][1]}")
     print(f"  peak p50 {audit['peak_mw']:,.0f} MW")
     print(f"  published {JSON_PATH}")
+    print(f"  index     {INDEX_PATH}")

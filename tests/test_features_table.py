@@ -45,7 +45,9 @@ def store(tmp_path_factory) -> tuple:
     registry_path = root / "plants.parquet"
     plants.to_parquet(registry_path)
     region = CAISO_CA.__class__(
+        id="test",
         name="TEST",
+        kind="iso",
         timezone=CAISO_CA.timezone,
         iso=CAISO_CA.iso,
         plant_registry_path=registry_path,
@@ -140,7 +142,9 @@ def test_an_absent_zone_cannot_be_written(store, tmp_path) -> None:
         only_kern
     )
     narrow = region.__class__(
+        id="kern",
         name="KERN",
+        kind="iso",
         timezone=region.timezone,
         iso=region.iso,
         plant_registry_path=only_kern,

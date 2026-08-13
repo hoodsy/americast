@@ -35,7 +35,9 @@ def region(tmp_path_factory):
     path = root / "plants.parquet"
     registry(**ALL_ZONES).to_parquet(path)
     return CAISO_CA.__class__(
+        id="test",
         name="TEST",
+        kind="iso",
         timezone=CAISO_CA.timezone,
         iso=CAISO_CA.iso,
         plant_registry_path=path,
@@ -290,3 +292,94 @@ def test_verify_catches_a_forecast_graded_against_itself(published) -> None:
         ),
     )
     assert grade_daily.verify(self_graded)["perfect"] == len(self_graded)
+
+
+# --- the multi-region contract ---------------------------------------
+
+
+def test_the_contract_is_versioned(published) -> None:
+    """A frozen public contract needs a version before it needs to change."""
+    assert run_daily.to_json(published)["schema_version"] == run_daily.SCHEMA_VERSION
+
+
+def test_the_region_identifies_itself(published, region) -> None:
+    """A national map needs more than a name string per region."""
+    block = run_daily.to_json(published, region=region)["region"]
+    assert block == {
+        "id": "test",
+        "name": "TEST",
+        "kind": "iso",
+        "timezone": region.timezone,
+        "graded": True,
+    }
+
+
+def test_an_ungraded_region_says_so(published, region) -> None:
+    """HRRR covers the whole country; actuals feeds do not.
+
+    A region we can forecast but cannot score is a different product,
+    and a consumer must be able to tell without asking.
+    """
+    ungraded = CAISO_CA.__class__(
+        id="nogrid", name="No Grid", kind="balancing_authority",
+        timezone=region.timezone, iso=region.iso,
+        plant_registry_path=region.plant_registry_path, graded=False,
+    )
+    payload = run_daily.to_json(published, region=ungraded)
+    assert payload["region"]["graded"] is False
+    assert payload["validated"] is False
+
+
+def test_the_peak_matches_the_series(published) -> None:
+    payload = run_daily.to_json(published)
+    assert payload["peak"]["p50_mw"] == pytest.approx(max(payload["p50_mw"]))
+    index = payload["p50_mw"].index(max(payload["p50_mw"]))
+    assert payload["peak"]["valid_time"] == payload["valid_times"][index]
+
+
+def test_generated_at_is_reported(published) -> None:
+    """Distinguishes a stale run from a pipeline that never fired."""
+    stamped = pd.Timestamp("2026-08-13T09:04:12Z")
+    payload = run_daily.to_json(published, generated_at=stamped)
+    assert payload["generated_at"] == stamped.isoformat()
+
+
+def test_accuracy_is_absent_rather_than_faked_on_day_one(published) -> None:
+    """Before the first grading there is no error to report."""
+    assert run_daily.to_json(published)["accuracy"] is None
+
+
+def test_accuracy_travels_with_the_forecast(published) -> None:
+    scored = grade_daily.grade(published, labels(published))
+    summary = grade_daily.rolling(scored)
+    payload = run_daily.to_json(
+        published,
+        accuracy={
+            "window_days": summary["days"], "mae_mw": round(summary["mae_mw"], 1),
+            "bias_mw": round(summary["bias_mw"], 1),
+            "coverage": round(summary["coverage"], 3), "graded_hours": summary["n"],
+        },
+    )
+    assert payload["accuracy"]["mae_mw"] > 0.0
+    assert payload["accuracy"]["window_days"] == grade_daily.ROLLING_DAYS
+
+
+def test_the_index_lists_where_to_fetch_each_region() -> None:
+    payload = run_daily.index()
+    assert payload["schema_version"] == run_daily.SCHEMA_VERSION
+    entry = payload["regions"][0]
+    assert entry["id"] == CAISO_CA.id
+    assert entry["forecast"] == f"{CAISO_CA.id}/forecast.json"
+    assert entry["scoreboard"] == f"{CAISO_CA.id}/scoreboard.json"
+
+
+def test_the_index_grows_with_regions(region) -> None:
+    """One entry today; the shape is what has to be right."""
+    payload = run_daily.index(regions=[CAISO_CA, region])
+    assert [entry["id"] for entry in payload["regions"]] == ["caiso", "test"]
+
+
+def test_published_objects_are_filed_under_their_region() -> None:
+    """Public URLs. Moving one later breaks every client that saved it."""
+    assert str(run_daily.JSON_PATH).endswith(f"{CAISO_CA.id}/forecast.json")
+    assert str(grade_daily.JSON_PATH).endswith(f"{CAISO_CA.id}/scoreboard.json")
