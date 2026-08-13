@@ -417,3 +417,46 @@ def test_uncovered_plants_is_empty_when_the_store_matches(tmp_path) -> None:
         plant_ids=(1, 2), counties=("Kern", "Imperial"), capacities=(100.0, 200.0)
     )
     assert uncovered_plants(same, root=tmp_path).empty
+
+
+def test_pending_lists_the_store_once(tmp_path, monkeypatch) -> None:
+    """One listing, not one probe per target.
+
+    `exists` per run is free on a disk and a network round-trip against
+    a bucket. At 1,590 targets that stalled a backfill for minutes
+    before the first worker started, which looked like a hang.
+    """
+    from americast import storage
+    from americast.ingest.hrrr import pending, runs
+
+    probes = 0
+    real_exists = storage.exists
+
+    def counting_exists(location):
+        nonlocal probes
+        probes += 1
+        return real_exists(location)
+
+    monkeypatch.setattr(storage, "exists", counting_exists)
+    targets = runs("2025-03-01", "2025-04-30", hours=(0, 6, 12, 18))
+    assert len(targets) > 200
+
+    todo = pending(targets, root=tmp_path)
+    assert todo == targets, "an empty store means everything is pending"
+    assert probes <= 1, f"probed {probes} times; the store should be listed once"
+
+
+def test_pending_skips_runs_already_stored(tmp_path) -> None:
+    from test_features import weather
+
+    from americast.ingest.hrrr import pending, run_path, runs, write
+
+    targets = runs("2025-03-01", "2025-03-03", hours=(6,))
+    stored = weather(str(targets[0]), leads=range(1, 3), plant_ids=(1, 2))
+    stored["run_time"] = targets[0]
+    write(stored, root=tmp_path)
+    assert run_path(targets[0], tmp_path).exists()
+
+    todo = pending(targets, root=tmp_path)
+    assert targets[0] not in todo
+    assert len(todo) == len(targets) - 1

@@ -404,12 +404,22 @@ def pending(
     manifest calls `missing` is a hole in the archive and is never
     retried. `partial` and `failed` runs do come back, because those
     usually mean a bad afternoon on the network, not absent data.
+
+    **The store is listed once, not probed per target.** Asking
+    `exists` for each run was free against a local disk and is a network
+    round-trip against a bucket: 1,590 sequential HeadObject calls from
+    another region, before a single worker starts. One listing answers
+    the same question, and the set membership after it is free.
     """
     manifest = read_manifest(root)
     absent = set(manifest.loc[manifest["status"] == "missing", "run_time"])
+    stored = {
+        str(path).rsplit("/", 1)[-1] for path in storage.listdir(root, ".parquet")
+    }
+
     todo = []
     for run_time in targets:
-        if storage.exists(run_path(run_time, root)):
+        if str(run_path(run_time, root)).rsplit("/", 1)[-1] in stored:
             continue
         if run_time in absent:
             continue
