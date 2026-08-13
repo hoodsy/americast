@@ -317,7 +317,10 @@ if __name__ == "__main__":
 
     parts = split(load())
     layout = verify_split(parts)
-    print("split:", layout["graded_rows"], f"overlap={layout['overlap']}")
+    print("  rows:", layout["graded_rows"], f"overlap={layout['overlap']}")
+    for name in ("train", "validate", "test"):
+        start, end = layout["spans"][name]
+        print(f"  {name:9s} {start:%Y-%m-%d} -> {end:%Y-%m-%d}")
 
     fitted, provenance = train(parts)
     save(fitted, provenance)

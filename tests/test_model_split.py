@@ -11,11 +11,13 @@ import pytest
 from americast.features.county import ZONES
 from americast.model.split import (
     FEATURES,
+    PERIODS,
     TRAIN_END,
     VAL_END,
     design,
     graded,
     split,
+    trailing,
     verify,
 )
 
@@ -225,3 +227,61 @@ def test_verify_notices_a_deliberately_poisoned_split(parts: dict) -> None:
     poisoned = dict(parts)
     poisoned["test"] = pd.concat([parts["test"], parts["train"].head(10)])
     assert verify(poisoned)["overlap"] > 0
+
+
+# --- the trailing window ---------------------------------------------
+
+
+def test_trailing_measures_back_from_the_newest_data(synthetic: pd.DataFrame) -> None:
+    """Not from the clock: the same table must always split the same way."""
+    parts = trailing(synthetic)
+    newest = synthetic["valid_time"].max()
+    assert parts["test"]["valid_time"].max() <= newest
+    assert parts["test"]["valid_time"].min() >= newest - pd.DateOffset(months=4)
+
+
+def test_trailing_is_reproducible(synthetic: pd.DataFrame) -> None:
+    first = trailing(synthetic)
+    second = trailing(synthetic)
+    for name in PERIODS:
+        assert first[name].equals(second[name])
+
+
+def test_trailing_periods_are_ordered_and_disjoint(synthetic: pd.DataFrame) -> None:
+    parts = trailing(synthetic)
+    assert parts["train"]["valid_time"].max() < parts["validate"]["valid_time"].min()
+    assert parts["validate"]["valid_time"].max() < parts["test"]["valid_time"].min()
+    seen = [set(part["run_time"]) for part in parts.values()]
+    assert not seen[0] & seen[1]
+    assert not seen[1] & seen[2]
+
+
+def test_trailing_drops_data_older_than_the_window(synthetic: pd.DataFrame) -> None:
+    """The whole point: a stale fleet must fall out of the fit."""
+    parts = trailing(synthetic, train_months=6, validate_months=2, test_months=2)
+    kept = sum(len(part) for part in parts.values())
+    assert kept < len(synthetic), "a 10-month window cannot keep 40 months"
+    oldest_kept = parts["train"]["valid_time"].min()
+    assert oldest_kept > synthetic["valid_time"].min()
+
+
+def test_trailing_moves_when_the_data_moves(synthetic: pd.DataFrame) -> None:
+    """Two rebuilds three months apart must fit different periods."""
+    older = synthetic[synthetic["valid_time"] < synthetic["valid_time"].max() - pd.DateOffset(months=3)]
+    assert (
+        trailing(older)["train"]["valid_time"].min()
+        < trailing(synthetic)["train"]["valid_time"].min()
+    )
+
+
+def test_trailing_keeps_the_straddle_rule(synthetic: pd.DataFrame) -> None:
+    """Shared with `split`, so a leak cannot appear in only one of them."""
+    assert verify(trailing(synthetic))["overlap"] == 0
+
+
+def test_a_short_table_does_not_produce_an_empty_train(synthetic: pd.DataFrame) -> None:
+    """A store younger than the window clamps rather than returning nothing."""
+    recent = synthetic[synthetic["valid_time"] > synthetic["valid_time"].max() - pd.DateOffset(months=8)]
+    parts = trailing(recent)
+    assert len(parts["train"]) > 0
+    assert len(parts["test"]) > 0

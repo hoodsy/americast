@@ -34,6 +34,15 @@ VAL_END = pd.Timestamp("2025-07-01", tz="UTC")
 
 PERIODS = ("train", "validate", "test")
 
+# The trailing window `trailing` uses, in months. Twelve months of
+# training covers one whole seasonal cycle, which is the minimum that
+# sees a spring curtailment season; three months each of validation and
+# test is enough to stop on and to score on without reaching back into
+# a fleet that no longer exists.
+TRAIN_MONTHS = 12
+VALIDATE_MONTHS = 3
+TEST_MONTHS = 3
+
 # What the model is allowed to read. run_time and valid_time are
 # deliberately absent: a tree splitting on a raw timestamp learns "after
 # March 2024, add 900 MW", which is fleet growth memorised as a date and
@@ -132,13 +141,25 @@ def split(table: pd.DataFrame) -> dict[str, pd.DataFrame]:
     cost 47, 36 and 36 rows of 61,899, and every alternative buys those
     rows back with a leak.
     """
-    edges = {
-        "train": (table["valid_time"].min(), TRAIN_END),
-        "validate": (TRAIN_END, VAL_END),
-        "test": (VAL_END, table["valid_time"].max() + pd.Timedelta(hours=1)),
-    }
-    built = design(table)
+    return _cut(
+        table,
+        {
+            "train": (table["valid_time"].min(), TRAIN_END),
+            "validate": (TRAIN_END, VAL_END),
+            "test": (VAL_END, table["valid_time"].max() + pd.Timedelta(hours=1)),
+        },
+    )
 
+
+def _cut(
+    table: pd.DataFrame, edges: dict[str, tuple[pd.Timestamp, pd.Timestamp]]
+) -> dict[str, pd.DataFrame]:
+    """Apply period boundaries, keeping only rows wholly inside one.
+
+    Shared by `split` and `trailing` so the straddle rule cannot drift
+    between the model Gate 5 was graded on and the model in production.
+    """
+    built = design(table)
     parts = {}
     for name, (start, end) in edges.items():
         inside = (
@@ -149,6 +170,52 @@ def split(table: pd.DataFrame) -> dict[str, pd.DataFrame]:
         )
         parts[name] = built[inside].copy()
     return parts
+
+
+def trailing(
+    table: pd.DataFrame,
+    train_months: int = TRAIN_MONTHS,
+    validate_months: int = VALIDATE_MONTHS,
+    test_months: int = TEST_MONTHS,
+) -> dict[str, pd.DataFrame]:
+    """The same three periods, measured back from the newest data.
+
+    `split` cuts on fixed dates, which is what Gate 5 needs: a frozen
+    boundary is what makes its numbers reproducible and arguable. A
+    model that runs every day needs the opposite. The fleet is drifting
+    — CAISO delivered 0.967x the physical model in 2023 and 1.023x in
+    2025, and none of the causes tested so far account for most of it —
+    so a model fitted on fixed dates gets steadily further from the
+    fleet it is predicting. That drift is what put a -405 MW bias into
+    Gate 5's test period.
+
+    Retraining on a trailing window does not explain the drift and does
+    not remove it. It bounds it: the model is never fitted to a fleet
+    more than `train_months + validate_months + test_months` old, so the
+    error never compounds past one window's worth.
+
+    **Measured from the data, not from the clock.** Taking `now` would
+    make a rebuild depend on the day it ran, and two people rebuilding
+    the same store would get different models. The newest `valid_time`
+    is a property of the input, so the same table always splits the same
+    way.
+
+    The straddle rule is `split`'s, unchanged: a row joins a period only
+    when both its timestamps are inside.
+    """
+    newest = table["valid_time"].max()
+    test_start = newest - pd.DateOffset(months=test_months)
+    validate_start = test_start - pd.DateOffset(months=validate_months)
+    train_start = validate_start - pd.DateOffset(months=train_months)
+
+    return _cut(
+        table,
+        {
+            "train": (max(train_start, table["valid_time"].min()), validate_start),
+            "validate": (validate_start, test_start),
+            "test": (test_start, newest + pd.Timedelta(hours=1)),
+        },
+    )
 
 
 def verify(parts: dict[str, pd.DataFrame]) -> dict:

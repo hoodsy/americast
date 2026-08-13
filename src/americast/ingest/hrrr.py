@@ -7,6 +7,7 @@ VBDSF, VDDSF, TCDC, TMP:2m, UGRD/VGRD:10m — sample them at plant
 coordinates, and discard the grid. Grids are never stored.
 """
 
+import io
 import os
 import shutil
 import time
@@ -17,10 +18,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 import xarray as xr
 from herbie import Herbie
 
+from americast import storage
 from americast.region import CAISO_CA
 from americast.schemas import HRRR_WEATHER
 
@@ -49,7 +50,7 @@ GRIB_TMP = Path("data/tmp/herbie")
 
 # One parquet per run. A file that exists means that run is stored;
 # the manifest beside it records the runs that produced no file.
-HRRR_DIR = Path("data/hrrr")
+HRRR_DIR = storage.key("hrrr")
 
 # One line per attempted run: run_time, status, fhours, rows, seconds.
 # status is ok (48 hours) | partial (1-47) | missing (archive hole) |
@@ -60,12 +61,21 @@ MANIFEST_COLUMNS = ["run_time", "status", "fhours", "rows", "seconds"]
 TRIES = 3
 
 
-def run_path(run_time: pd.Timestamp, root: Path = HRRR_DIR) -> Path:
-    return root / f"hrrr_{run_time:%Y%m%d_%Hz}.parquet"
+def run_path(run_time: pd.Timestamp, root: Path | str = HRRR_DIR) -> Path | str:
+    return _member(root, f"hrrr_{run_time:%Y%m%d_%Hz}.parquet")
 
 
-def manifest_path(root: Path = HRRR_DIR) -> Path:
-    return root / "manifest.csv"
+def manifest_path(root: Path | str = HRRR_DIR) -> Path | str:
+    return _member(root, "manifest.csv")
+
+
+def _member(root: Path | str, name: str) -> Path | str:
+    """One file inside the run store, local or remote.
+
+    Object storage has no directories, so joining with `/` is the only
+    operation that means the same thing on both sides.
+    """
+    return Path(root) / name if isinstance(root, Path) else f"{root}/{name}"
 
 
 # cfgrib's names for the seven messages; fetch must deliver exactly these.
@@ -246,7 +256,7 @@ def build(
     return pd.concat(frames, ignore_index=True)
 
 
-def write(df: pd.DataFrame, root: Path = HRRR_DIR) -> Path:
+def write(df: pd.DataFrame, root: Path | str = HRRR_DIR) -> Path | str:
     """Write one run's frame as one schema-enforced parquet.
 
     Rewriting the same run replaces its file — idempotent by
@@ -255,9 +265,8 @@ def write(df: pd.DataFrame, root: Path = HRRR_DIR) -> Path:
     if df["run_time"].nunique() != 1:
         raise ValueError("one file per run: frame must hold a single run_time")
     path = run_path(df["run_time"].iloc[0], root)
-    root.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pandas(df, schema=HRRR_WEATHER, preserve_index=False)
-    pq.write_table(table, path)
+    storage.write_parquet(table, path)
     return path
 
 
@@ -269,7 +278,7 @@ PILOT_RUNS = [pd.Timestamp(2024, 6, day, 6, tz="UTC") for day in range(1, 31)]
 
 
 def load(
-    root: Path = HRRR_DIR, run_times: list[pd.Timestamp] | None = None
+    root: Path | str = HRRR_DIR, run_times: list[pd.Timestamp] | None = None
 ) -> pd.DataFrame:
     """Runs stored in `root`, concatenated into one frame.
 
@@ -289,23 +298,23 @@ def load(
     reading in slices instead.
     """
     if run_times is None:
-        paths = sorted(root.glob("hrrr_*.parquet"))
+        paths = storage.listdir(root, ".parquet")
     else:
         wanted = [run_path(run_time, root) for run_time in sorted(run_times)]
-        paths = [path for path in wanted if path.exists()]
+        paths = [path for path in wanted if storage.exists(path)]
     if not paths:
         raise FileNotFoundError(f"no run files in {root}")
     stale = []
     for path in paths:
-        if not pq.read_schema(path).equals(HRRR_WEATHER):
-            stale.append(path.name)
+        if not storage.read_schema(path).equals(HRRR_WEATHER):
+            stale.append(str(path).rsplit("/", 1)[-1])
     if stale:
         raise ValueError(f"files do not match HRRR_WEATHER: {stale}")
-    frames = [pd.read_parquet(path) for path in paths]
+    frames = [storage.read_parquet(path) for path in paths]
     return pd.concat(frames, ignore_index=True)
 
 
-def pilot(root: Path = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
+def pilot(root: Path | str = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
     """Fetch the trial month: June 2024, 06z runs only, resumable.
 
     A run is skipped when its file already exists, so interrupting and
@@ -313,10 +322,10 @@ def pilot(root: Path = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
     call.
     """
     if plants is None:
-        plants = pd.read_parquet(CAISO_CA.plant_registry_path)
+        plants = storage.read_parquet(CAISO_CA.plant_registry_path)
     fetched = 0
     for run_time in PILOT_RUNS:
-        if run_path(run_time, root).exists():
+        if storage.exists(run_path(run_time, root)):
             continue
         frame = build(run_time, plants)
         path = write(frame, root)
@@ -326,7 +335,7 @@ def pilot(root: Path = HRRR_DIR, plants: pd.DataFrame | None = None) -> int:
 
 
 def uncovered_plants(
-    plants: pd.DataFrame, root: Path = HRRR_DIR
+    plants: pd.DataFrame, root: Path | str = HRRR_DIR
 ) -> pd.DataFrame:
     """Registry plants the weather store has never sampled.
 
@@ -345,30 +354,38 @@ def uncovered_plants(
     Reads one stored run rather than all of them, because every run
     carries the same plant set.
     """
-    stored = sorted(root.glob("hrrr_*.parquet"))
+    stored = storage.listdir(root, ".parquet")
     if not stored:
         return plants.copy()
-    sampled = set(pd.read_parquet(stored[-1], columns=["plant_id"])["plant_id"])
+    sampled = set(storage.read_parquet(stored[-1], columns=["plant_id"])["plant_id"])
     return plants[~plants["plant_id"].isin(sampled)].copy()
 
 
-def read_manifest(root: Path = HRRR_DIR) -> pd.DataFrame:
+def read_manifest(root: Path | str = HRRR_DIR) -> pd.DataFrame:
     """The record of every attempted run. Empty frame when none yet."""
     path = manifest_path(root)
-    if not path.exists():
+    if not storage.exists(path):
         return pd.DataFrame(columns=MANIFEST_COLUMNS)
-    out = pd.read_csv(path)
+    out = pd.read_csv(io.StringIO(storage.read_text(path)))
     out["run_time"] = pd.to_datetime(out["run_time"], utc=True)
     return out
 
 
-def record(row: dict, root: Path = HRRR_DIR) -> None:
-    """Append one line to the manifest, writing the header if new."""
+def record(row: dict, root: Path | str = HRRR_DIR) -> None:
+    """Add one line to the manifest, writing the header if new.
+
+    Read, append, write — not an append in place. Object storage has no
+    append, so the whole file is rewritten each time. That is affordable
+    because the manifest is one short line per run and only the driver
+    writes it, which is the same single-writer assumption the original
+    append relied on.
+    """
     path = manifest_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    new = not path.exists()
     line = pd.DataFrame([row], columns=MANIFEST_COLUMNS)
-    line.to_csv(path, mode="a", header=new, index=False)
+    if storage.exists(path):
+        existing = pd.read_csv(io.StringIO(storage.read_text(path)))
+        line = pd.concat([existing, line], ignore_index=True)
+    storage.write_text(path, line.to_csv(index=False))
 
 
 def runs(start: str, end: str, hours: tuple[int, ...] = (6,)) -> list[pd.Timestamp]:
@@ -378,7 +395,7 @@ def runs(start: str, end: str, hours: tuple[int, ...] = (6,)) -> list[pd.Timesta
 
 
 def pending(
-    targets: list[pd.Timestamp], root: Path = HRRR_DIR
+    targets: list[pd.Timestamp], root: Path | str = HRRR_DIR
 ) -> list[pd.Timestamp]:
     """The targets that still need work.
 
@@ -392,7 +409,7 @@ def pending(
     absent = set(manifest.loc[manifest["status"] == "missing", "run_time"])
     todo = []
     for run_time in targets:
-        if run_path(run_time, root).exists():
+        if storage.exists(run_path(run_time, root)):
             continue
         if run_time in absent:
             continue
@@ -400,7 +417,7 @@ def pending(
     return todo
 
 
-def one(run_time: pd.Timestamp, root: Path = HRRR_DIR) -> dict:
+def one(run_time: pd.Timestamp, root: Path | str = HRRR_DIR) -> dict:
     """Worker entry point: build one run, store it, describe the result.
 
     Each worker owns a scratch directory named for its own pid and
@@ -415,7 +432,7 @@ def one(run_time: pd.Timestamp, root: Path = HRRR_DIR) -> dict:
     started = time.perf_counter()
     status, fhours, rows = "failed", 0, 0
     try:
-        plants = pd.read_parquet(CAISO_CA.plant_registry_path)
+        plants = storage.read_parquet(CAISO_CA.plant_registry_path)
         frame = build(run_time, plants, scratch)
         fhours = int(frame["lead_hours"].nunique())
         rows = len(frame)
@@ -511,7 +528,7 @@ def verify(root: Path = HRRR_DIR) -> pd.DataFrame:
     manifest is the log of how they got there.
     """
     rows = []
-    for path in sorted(root.glob("hrrr_*.parquet")):
+    for path in storage.listdir(root, ".parquet"):
         frame = pd.read_parquet(path, columns=["run_time", "lead_hours", "plant_id"])
         rows.append(
             {
