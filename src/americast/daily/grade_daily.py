@@ -32,16 +32,17 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
+from americast import storage
 from americast.daily.run_daily import load as load_forecasts
 from americast.features.baselines import DAYLIGHT_MW
 from americast.ingest.caiso import STORE_PATH as CAISO_STORE
 from americast.ingest.caiso import to_hourly
 from americast.schemas import LIVE_SCORES
 
-STORE_PATH = Path("data/live/scores.parquet")
-JSON_PATH = Path("data/live/scoreboard.json")
+STORE_PATH = storage.key("live/scores.parquet")
+# Under the public prefix: this is the object a browser fetches.
+JSON_PATH = storage.public("scoreboard.json")
 
 # Twelve 5-minute readings make a whole hour. Fewer is a different
 # measurement, not a worse one.
@@ -77,18 +78,18 @@ def grade(
     )
 
 
-def append(frame: pd.DataFrame, path: Path = STORE_PATH) -> int:
+def append(frame: pd.DataFrame, path: Path | str = STORE_PATH) -> int:
     """Add scores, replacing any earlier grading of the same hours.
 
     Last write wins on (run_time, valid_time), so re-grading a day
     after a label revision updates it rather than storing both verdicts.
     Returns rows gained, which is zero on a re-run.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     before = 0
     combined = frame
-    if path.exists():
-        stored = pd.read_parquet(path)
+    present = storage.exists(path)
+    if present:
+        stored = storage.read_parquet(path)
         before = len(stored)
         combined = pd.concat([stored, frame], ignore_index=True)
 
@@ -111,16 +112,21 @@ def append(frame: pd.DataFrame, path: Path = STORE_PATH) -> int:
     # in-memory frame and the parquet round-trip disagree about integer
     # width, so `.equals` on the frames reports a difference that the
     # stored bytes do not have.
-    if path.exists() and table.equals(pq.read_table(path), check_metadata=False):
+    if present and table.equals(
+        pa.Table.from_pandas(
+            storage.read_parquet(path), schema=LIVE_SCORES, preserve_index=False
+        ),
+        check_metadata=False,
+    ):
         return 0
 
-    pq.write_table(table, path)
+    storage.write_parquet(table, path)
     return len(combined) - before
 
 
-def load(path: Path = STORE_PATH) -> pd.DataFrame:
+def load(path: Path | str = STORE_PATH) -> pd.DataFrame:
     """Read the scoreboard."""
-    return pd.read_parquet(path)
+    return storage.read_parquet(path)
 
 
 def rolling(scores: pd.DataFrame, days: int = ROLLING_DAYS) -> dict:
@@ -181,10 +187,9 @@ def to_json(scores: pd.DataFrame, days: int = ROLLING_DAYS) -> dict:
     }
 
 
-def publish(scores: pd.DataFrame, path: Path = JSON_PATH) -> None:
+def publish(scores: pd.DataFrame, path: Path | str = JSON_PATH) -> None:
     """Write the scoreboard contract."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(to_json(scores), indent=2))
+    storage.write_text(path, json.dumps(to_json(scores), indent=2))
 
 
 def verify(scores: pd.DataFrame) -> dict:

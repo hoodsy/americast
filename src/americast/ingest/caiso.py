@@ -16,12 +16,12 @@ from zoneinfo import ZoneInfo
 import gridstatus
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
+from americast import storage
 from americast.region import CAISO_CA, RegionConfig
 from americast.schemas import CAISO_SOLAR_5MIN
 
-STORE_PATH = Path("data/caiso/solar_5min.parquet")
+STORE_PATH = storage.key("caiso/solar_5min.parquet")
 
 
 def fetch_day(day: date) -> pd.DataFrame:
@@ -54,7 +54,7 @@ def to_hourly(df_5min: pd.DataFrame) -> pd.DataFrame:
     ).reset_index()
 
 
-def append_to_store(df: pd.DataFrame, path: Path) -> None:
+def append_to_store(df: pd.DataFrame, path: Path | str) -> None:
     """Merge rows into the parquet store; idempotent by construction.
 
     Duplicate utc_times keep the newest fetch. The tz guard exists because
@@ -63,16 +63,15 @@ def append_to_store(df: pd.DataFrame, path: Path) -> None:
     """
     if df["utc_time"].dt.tz is None:
         raise ValueError("utc_time must be tz-aware")
-    if path.exists():
-        df = pd.concat([pd.read_parquet(path), df], ignore_index=True)
+    if storage.exists(path):
+        df = pd.concat([storage.read_parquet(path), df], ignore_index=True)
     df = (
         df.drop_duplicates("utc_time", keep="last")
         .sort_values("utc_time")
         .reset_index(drop=True)
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pandas(df, schema=CAISO_SOLAR_5MIN, preserve_index=False)
-    pq.write_table(table, path)
+    storage.write_parquet(table, path)
 
 
 def backfill(
@@ -108,9 +107,9 @@ def _complete_days(path: Path, region: RegionConfig) -> set[date]:
     stored day is never considered complete — it may have been fetched
     mid-day — so backfill always refetches it.
     """
-    if not path.exists():
+    if not storage.exists(path):
         return set()
-    utc_time = pd.read_parquet(path, columns=["utc_time"])["utc_time"]
+    utc_time = storage.read_parquet(path, columns=["utc_time"])["utc_time"]
     local_days = utc_time.dt.tz_convert(region.timezone).dt.date
     counts = local_days.value_counts()
     days = set(counts[counts >= 276].index)

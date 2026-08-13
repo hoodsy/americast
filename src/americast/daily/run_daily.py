@@ -42,8 +42,8 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
+from americast import storage
 from americast.features.features import fleet
 from americast.features.table import one_run
 from americast.ingest import hrrr
@@ -52,8 +52,9 @@ from americast.model.split import design
 from americast.region import CAISO_CA, RegionConfig
 from americast.schemas import LIVE_FORECASTS
 
-STORE_PATH = Path("data/live/forecasts.parquet")
-JSON_PATH = Path("data/live/forecast.json")
+STORE_PATH = storage.key("live/forecasts.parquet")
+# Under the public prefix: this is the object a browser fetches.
+JSON_PATH = storage.public("forecast.json")
 
 # The run hour the model was trained on, and the one that spans two
 # whole Pacific days. See the module docstring.
@@ -108,7 +109,7 @@ def forecast(
     return predicted[columns].sort_values("valid_time", ignore_index=True)
 
 
-def append(frame: pd.DataFrame, path: Path = STORE_PATH) -> int:
+def append(frame: pd.DataFrame, path: Path | str = STORE_PATH) -> int:
     """Add a run to the store, replacing any earlier copy of it.
 
     Returns the number of rows the store gained, which is zero on a
@@ -116,11 +117,11 @@ def append(frame: pd.DataFrame, path: Path = STORE_PATH) -> int:
     winning: a re-run after a partial archive should upgrade the day,
     not sit beside it.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     before = 0
     combined = frame
-    if path.exists():
-        stored = pd.read_parquet(path)
+    present = storage.exists(path)
+    if present:
+        stored = storage.read_parquet(path)
         before = len(stored)
         combined = pd.concat([stored, frame], ignore_index=True)
 
@@ -143,16 +144,21 @@ def append(frame: pd.DataFrame, path: Path = STORE_PATH) -> int:
     # in-memory frame and the parquet round-trip disagree about integer
     # width, so `.equals` on the frames reports a difference that the
     # stored bytes do not have.
-    if path.exists() and table.equals(pq.read_table(path), check_metadata=False):
+    if present and table.equals(
+        pa.Table.from_pandas(
+            storage.read_parquet(path), schema=LIVE_FORECASTS, preserve_index=False
+        ),
+        check_metadata=False,
+    ):
         return 0
 
-    pq.write_table(table, path)
+    storage.write_parquet(table, path)
     return len(combined) - before
 
 
-def load(path: Path = STORE_PATH) -> pd.DataFrame:
+def load(path: Path | str = STORE_PATH) -> pd.DataFrame:
     """Read the published forecasts."""
-    return pd.read_parquet(path)
+    return storage.read_parquet(path)
 
 
 def to_json(frame: pd.DataFrame) -> dict:
@@ -184,10 +190,9 @@ def to_json(frame: pd.DataFrame) -> dict:
     }
 
 
-def publish(frame: pd.DataFrame, path: Path = JSON_PATH) -> None:
+def publish(frame: pd.DataFrame, path: Path | str = JSON_PATH) -> None:
     """Write the JSON contract."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(to_json(frame), indent=2))
+    storage.write_text(path, json.dumps(to_json(frame), indent=2))
 
 
 def verify(frame: pd.DataFrame) -> dict:

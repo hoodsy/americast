@@ -4,21 +4,28 @@ name: daily
 # ninety minutes to finish uploading a run, and `run_daily.latest`
 # refuses anything younger than two. Firing earlier would fetch a
 # half-written run and publish a forecast with holes in it.
-#
-# Grading runs in the same job, after the forecast. It scores whatever
-# the label store has reached, which on any given morning is yesterday
-# — CAISO's fuel mix lands within the hour, but the run being graded is
-# always at least a day old.
 on:
   schedule:
     - cron: "0 9 * * *"
   workflow_dispatch:
 
-# One at a time. Two overlapping runs would both read the store, both
-# append, and the second write would drop the first one's rows.
+# One at a time. Two overlapping runs would both read a store, both
+# append, and the second write would drop the first one's rows. S3 has
+# no transactions, so this is the only thing preventing that.
 concurrency:
   group: daily
   cancel-in-progress: false
+
+# Every store resolves against this root, so the job reads the registry,
+# the model and the labels straight out of the bucket and writes the
+# forecasts back to it. Nothing durable touches the runner's disk, which
+# is why there is no cache step here: caches are evicted after seven
+# days and the scoreboard is meant to accumulate for years.
+env:
+  AMERICAST_DATA_ROOT: ${{ vars.AMERICAST_DATA_ROOT }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
 
 jobs:
   forecast:
@@ -31,40 +38,35 @@ jobs:
           python-version: "3.13"
       - run: uv sync
 
-      # The stores are the state this loop carries between days. They
-      # are restored by prefix so a failed run never loses history: the
-      # newest matching cache wins, and today's key is written fresh.
-      - name: Restore live stores
-        uses: actions/cache/restore@v4
-        with:
-          path: data/live
-          key: live-${{ github.run_id }}
-          restore-keys: live-
+      - name: Check the bucket is configured
+        run: |
+          test -n "$AMERICAST_DATA_ROOT" || {
+            echo "AMERICAST_DATA_ROOT is unset; set it as a repository variable"
+            exit 1
+          }
+          echo "writing to $AMERICAST_DATA_ROOT"
 
+      # Yesterday's actuals, so grading has something to score.
       - name: Fetch labels
         run: uv run python -m americast.ingest.caiso
 
+      # Fetches one HRRR run into memory; nothing is stored locally.
       - name: Forecast
         run: uv run python -m americast.daily.run_daily
 
       - name: Grade
         run: uv run python -m americast.daily.grade_daily
 
-      - name: Save live stores
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: data/live
-          key: live-${{ github.run_id }}
-
-      # The JSON contract, as an artifact the frontend can fetch and a
-      # human can inspect after a bad morning.
+      # A copy of the two public objects, kept for 90 days. The bucket
+      # is the source of truth; this exists so a bad morning can be
+      # inspected without bucket access.
       - name: Upload contract
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: forecast-json
           path: |
-            data/live/forecast.json
-            data/live/scoreboard.json
+            data/public/forecast.json
+            data/public/scoreboard.json
           retention-days: 90
+          if-no-files-found: ignore

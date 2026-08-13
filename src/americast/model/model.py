@@ -57,6 +57,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+from americast import storage
 from americast.model.split import (
     FEATURES,
     SCALE,
@@ -66,7 +67,7 @@ from americast.model.split import (
     graded,
 )
 
-MODEL_DIR = Path("data/model")
+MODEL_DIR = storage.key("model")
 
 # The band, and the names its columns carry everywhere downstream.
 QUANTILES = {"p10": 0.1, "p50": 0.5, "p90": 0.9}
@@ -202,20 +203,36 @@ def save(models: dict[str, lgb.Booster], meta: dict, directory: Path = MODEL_DIR
     LightGBM's own text format, not pickle. A pickled booster is tied to
     the version of the library that made it; the text format is a
     readable list of trees that loads years later, and can be diffed.
+
+    Written through `model_to_string` rather than `save_model`, because
+    LightGBM writes to a filename and cannot reach object storage. The
+    string is the same bytes either way.
     """
-    directory.mkdir(parents=True, exist_ok=True)
     for name, booster in models.items():
-        booster.save_model(str(directory / f"{name}.txt"), num_iteration=booster.best_iteration)
-    (directory / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
+        text = booster.model_to_string(num_iteration=booster.best_iteration)
+        storage.write_text(_member(directory, f"{name}.txt"), text)
+    storage.write_text(
+        _member(directory, "meta.json"), json.dumps(meta, indent=2, default=str)
+    )
 
 
 def load(directory: Path = MODEL_DIR) -> tuple[dict[str, lgb.Booster], dict]:
     """Read back what `save` wrote."""
     models = {
-        name: lgb.Booster(model_file=str(directory / f"{name}.txt")) for name in QUANTILES
+        name: lgb.Booster(model_str=storage.read_text(_member(directory, f"{name}.txt")))
+        for name in QUANTILES
     }
-    meta = json.loads((directory / "meta.json").read_text())
+    meta = json.loads(storage.read_text(_member(directory, "meta.json")))
     return models, meta
+
+
+def _member(directory: Path | str, name: str) -> Path | str:
+    """One file inside the model directory, local or remote.
+
+    Object storage has no directories, so joining with `/` is the only
+    operation that means the same thing on both sides.
+    """
+    return Path(directory) / name if isinstance(directory, Path) else f"{directory}/{name}"
 
 
 def importance(models: dict[str, lgb.Booster], name: str = "p50") -> pd.Series:
