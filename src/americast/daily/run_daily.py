@@ -47,6 +47,7 @@ from americast import storage
 from americast.features.features import fleet
 from americast.features.table import one_run
 from americast.ingest import hrrr
+from americast.model import calibrate
 from americast.model import model as boosters
 from americast.model.split import design
 from americast.region import CAISO_CA, RegionConfig
@@ -91,6 +92,7 @@ def forecast(
     run_time: pd.Timestamp,
     models: dict,
     region: RegionConfig = CAISO_CA,
+    band: tuple[float, float] | None = None,
 ) -> pd.DataFrame:
     """One run, fetched and turned into a 48-hour forecast.
 
@@ -98,6 +100,12 @@ def forecast(
     the two physical columns the frontend draws beneath it. Raises when
     the archive has nothing, because a morning with no forecast is a
     failure to report rather than an empty file to publish.
+
+    `band` re-aims p10 and p90 from recently graded hours; None
+    publishes the boosters' own band. The trained band covers 63.6% of
+    hours against a promised 80%, because uncertainty here is seasonal
+    and the fit inherits whichever season it saw. See
+    `model/calibrate.py`.
 
     Featurization goes through `features.table.one_run`, the same
     function the training table uses. Two copies of that ordering would
@@ -113,7 +121,8 @@ def forecast(
     featurized = design(one_run(weather, plants, region))
     predicted = boosters.attach(models, featurized)
     columns = [field.name for field in LIVE_FORECASTS]
-    return predicted[columns].sort_values("valid_time", ignore_index=True)
+    forecast_rows = predicted[columns].sort_values("valid_time", ignore_index=True)
+    return calibrate.apply(forecast_rows, band)
 
 
 def append(frame: pd.DataFrame, path: Path | str = STORE_PATH) -> int:
@@ -319,10 +328,17 @@ def verify(frame: pd.DataFrame) -> dict:
 
 
 if __name__ == "__main__":
+    from americast.daily import grade_daily
+
     models, meta = boosters.load()
     run_time = latest()
 
-    published = forecast(run_time, models)
+    # Re-aim the band from hours already graded. Nothing here looks
+    # forward: yesterday's scoreboard is the only input.
+    band = None
+    if storage.exists(grade_daily.STORE_PATH):
+        band = calibrate.offsets(grade_daily.load())
+    published = forecast(run_time, models, band=band)
     gained = append(published)
     publish(load())
     publish_index()
@@ -332,5 +348,10 @@ if __name__ == "__main__":
     print(f"  {audit['hours']} hours, {gained} new rows in the store")
     print(f"  span {audit['span'][0]} to {audit['span'][1]}")
     print(f"  peak p50 {audit['peak_mw']:,.0f} MW")
+    if band is None:
+        print("  band: uncalibrated (not enough graded history yet)")
+    else:
+        print(f"  band: recalibrated from the last {calibrate.WINDOW_DAYS} days "
+              f"({band[0]:+.3f} / {band[1]:+.3f} x clear_mw)")
     print(f"  published {JSON_PATH}")
     print(f"  index     {INDEX_PATH}")

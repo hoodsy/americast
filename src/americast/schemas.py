@@ -89,6 +89,12 @@ LIVE_SCORES = pa.schema(
         pa.field("solar_mw", pa.float64(), nullable=False),
         pa.field("error_mw", pa.float64(), nullable=False),
         pa.field("inside_band", pa.bool_(), nullable=False),
+        # Carried so the band can be recalibrated from this file alone.
+        # Forecast error scales with what the fleet could produce, so a
+        # residual is only comparable across seasons once divided by the
+        # ceiling. Without this column the scoreboard records how wrong
+        # the band was but not enough to fix it.
+        pa.field("fleet_clear_mw", pa.float64(), nullable=False),
     ]
 )
 

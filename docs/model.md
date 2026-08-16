@@ -137,6 +137,49 @@ which is the same clock reading twice. Nothing here says how error
 grows with lead time, and the report carries that warning on the page.
 Pass 3 of the backfill is what separates the two axes.
 
+## The band is aimed wrong, not sized wrong — and it is fixed
+
+**Fixed 2026-08-17.** Coverage went from 63.6% to **79.6%** against a
+nominal 80%, with a *narrower* band (3,877 MW against 4,016).
+
+The obvious repair was the wrong one. A correctly-centred band needs
+about 3,200 MW to reach 80%; the trained band was 4,000 MW and still
+missed. Width was never the problem.
+
+**Uncertainty here is seasonal, and the fit inherits whichever season
+it saw.** On validation, February to May, 18.8% of hours fell *below*
+the band. On test, May to August, 22.5% fell *above* it. Same band,
+opposite failures.
+
+Two things were measured rather than assumed, and both rule out the
+repairs that look obvious:
+
+- **Training the tails harder makes it worse.** Forcing 600 rounds in
+  place of early stopping tightened the band to 1,669 MW and dropped
+  coverage to 46.6%. An earlier version of this document called the
+  tails "badly under-fit"; that was wrong. Patient early stopping (400
+  rounds of patience instead of 100) returns *identical* models, so
+  they had genuinely converged. Early stopping was the only thing
+  keeping the band wide enough to be nearly useful.
+- **Calibrating once, on validation, overshoots to 91%** — it corrects
+  a spring band toward spring, then applies it to summer.
+
+The fix is to recalibrate continuously, in `model/calibrate.py`: take
+the residuals from the last 30 graded days, divide by the clear-sky
+ceiling so seasons compare, and read the 10th and 90th percentiles.
+Nothing looks forward — `grade_daily` writes those residuals every
+morning, so the daily loop already has what it needs, and the
+calibration follows the season without anyone deciding to intervene.
+
+| window | coverage | below p10 | above p90 | width |
+|---|---|---|---|---|
+| 14 days | 78.4% | 10.0% | 11.5% | 3,673 MW |
+| **30 days** | **79.6%** | 8.4% | 12.0% | **3,877 MW** |
+| 60 days | 82.0% | 7.2% | 10.7% | 4,239 MW |
+
+The point forecast is untouched. `p50` and the 1,039 MW MAE are
+exactly what they were.
+
 ## The band does not cover what it claims
 
 The p10–p90 band should hold the truth 80% of the time. It holds it
