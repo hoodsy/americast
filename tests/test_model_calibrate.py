@@ -83,7 +83,7 @@ def test_only_the_recent_window_counts() -> None:
     recent = scoreboard([100.0] * 400)
     both = pd.concat([old, recent], ignore_index=True)
 
-    low, high = calibrate.offsets(both)
+    _, high = calibrate.offsets(both)
     assert high < 0.05, "the 120-day-old residuals must not reach the band"
 
 
@@ -92,7 +92,7 @@ def test_night_rows_do_not_enter_the_calibration() -> None:
     lit = scoreboard([500.0] * 300)
     dark = scoreboard([0.0] * 300, ceiling=0.0)
     both = pd.concat([lit, dark], ignore_index=True)
-    low, high = calibrate.offsets(both)
+    _, high = calibrate.offsets(both)
     assert high == pytest.approx(0.05, rel=1e-6)
 
 
