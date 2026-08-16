@@ -325,7 +325,27 @@ def test_attempt_returns_after_a_transient_failure(
     assert len(calls) == 2
 
 
-def test_one_stores_a_full_run(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def stub_registry(monkeypatch: pytest.MonkeyPatch):
+    """Stop `one` reading the real registry off local disk.
+
+    `one` is a worker entry point, so it loads the registry itself
+    rather than being handed one. That made these tests pass on a
+    machine with a built registry and fail in CI, where data/ is
+    gitignored and absent -- the read raised, the blind except caught
+    it, and the status came back "failed" instead of "ok". A unit test
+    must not depend on an artifact the repo does not carry.
+    """
+    from test_features import registry as registry_fixture
+
+    monkeypatch.setattr(
+        hrrr.storage, "read_parquet", lambda *a, **k: registry_fixture()
+    )
+
+
+def test_one_stores_a_full_run(
+    tmp_path, stub_registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def fake_build(
         run_time: pd.Timestamp, plants: pd.DataFrame, scratch: object = None
     ) -> pd.DataFrame:
@@ -343,7 +363,7 @@ def test_one_stores_a_full_run(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_one_reports_a_missing_run_without_writing(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, stub_registry, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     empty = pd.DataFrame(columns=[f.name for f in HRRR_WEATHER])
     monkeypatch.setattr(hrrr, "build", lambda r, p, s=None: empty)
