@@ -31,6 +31,11 @@ jobs:
   forecast:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # The bucket credentials live in this environment, not on the repo.
+    # Without naming it here every secret and variable below resolves to
+    # an empty string, which is how this first ran: four blank values and
+    # a job that got as far as the configuration guard.
+    environment: americast-env
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
