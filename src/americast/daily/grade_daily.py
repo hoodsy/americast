@@ -213,6 +213,10 @@ def verify(scores: pd.DataFrame) -> dict:
 
 
 if __name__ == "__main__":
+    # Aliased for the same reason run_daily aliases it: `publish` is
+    # already a function in this module.
+    from americast.daily import publish as archive
+
     forecasts = load_forecasts()
     labels = to_hourly(pd.read_parquet(CAISO_STORE))
 
@@ -228,3 +232,11 @@ if __name__ == "__main__":
         print(f"  MAE {summary['mae_mw']:,.0f} MW   bias {summary['bias_mw']:+,.0f} MW")
         print(f"  band coverage {summary['coverage']:.1%}")
     print(f"  published {JSON_PATH}")
+
+    # Carry what was just graded into the archive. A run stays open for
+    # a day or two while its hours land, so this is the step that turns
+    # "nobody has checked this" into a published number.
+    reopened = archive.refresh()
+    print(f"  archive   rewrote {len(reopened)} open run(s)")
+    for run_time in reopened:
+        print(f"    {run_time:%Y-%m-%d %H}z")

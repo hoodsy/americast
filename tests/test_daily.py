@@ -14,6 +14,7 @@ from test_features_table import ALL_ZONES
 from test_model_split import table as synthetic_table
 
 from americast.daily import grade_daily, run_daily
+from americast.features.baselines import DAYLIGHT_MW
 from americast.ingest import hrrr
 from americast.model import model as boosters
 from americast.model.split import split
@@ -401,3 +402,67 @@ def test_the_index_points_at_the_run_archive() -> None:
     entry = run_daily.index()["regions"][0]
     assert entry["runs"] == "caiso/runs.json"
     assert entry["plants"] == "caiso/plants.json.gz"
+
+
+def test_grading_carries_the_actuals_into_the_archive(
+    monkeypatch, tmp_path, published
+) -> None:
+    """A run graded this morning must be re-published, or the archive
+    goes on saying nobody has checked it."""
+    from americast import storage
+    from americast.daily import publish as archive
+
+    monkeypatch.setenv(storage.ENV_VAR, str(tmp_path))
+    monkeypatch.setattr(archive, "_map_objects", lambda *a, **k: None)
+
+    run = published["run_time"].max()
+    ungraded = LIVE_SCORES.empty_table().to_pandas()
+    archive.write(
+        run,
+        now=run + pd.Timedelta(hours=4),
+        forecasts=published,
+        scores=ungraded,
+    )
+
+    path = storage.child(archive.run_prefix(run), "forecast.json")
+    before = json.loads(storage.read_text(path))
+    assert all(hour is None for hour in before["observed_mw"])
+    assert before["error"] is None
+
+    lit = published[published["p90_mw"] > DAYLIGHT_MW].head(3)
+    scored = grade_daily.grade(published, labels(lit))
+    archive.refresh(
+        now=run + pd.Timedelta(hours=5), forecasts=published, scores=scored
+    )
+
+    after = json.loads(storage.read_text(path))
+    assert sum(hour is not None for hour in after["observed_mw"]) == 3
+    assert after["error"]["graded_hours"] == 3
+
+
+def test_the_archive_records_a_night_hour_without_scoring_it(
+    monkeypatch, tmp_path, published
+) -> None:
+    """observed_mw is every graded hour; error is daylight only.
+
+    Night is trivially correct, so counting it would flatter the run's
+    MAE by about half. But the actual still belongs on the curve.
+    """
+    from americast import storage
+    from americast.daily import publish as archive
+
+    monkeypatch.setenv(storage.ENV_VAR, str(tmp_path))
+    monkeypatch.setattr(archive, "_map_objects", lambda *a, **k: None)
+
+    run = published["run_time"].max()
+    dark = published[published["p90_mw"] <= DAYLIGHT_MW].head(3)
+    scored = grade_daily.grade(published, labels(dark))
+    archive.write(
+        run, now=run + pd.Timedelta(hours=5), forecasts=published, scores=scored
+    )
+
+    stored = json.loads(
+        storage.read_text(storage.child(archive.run_prefix(run), "forecast.json"))
+    )
+    assert sum(hour is not None for hour in stored["observed_mw"]) == 3
+    assert stored["error"] is None
