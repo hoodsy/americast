@@ -361,3 +361,64 @@ def _scores() -> pd.DataFrame:
     if not storage.exists(grade_daily.STORE_PATH):
         return LIVE_SCORES.empty_table().to_pandas()
     return grade_daily.load()
+
+
+def verify(
+    region: RegionConfig = CAISO_CA,
+    now: pd.Timestamp | None = None,
+    forecasts: pd.DataFrame | None = None,
+    scores: pd.DataFrame | None = None,
+) -> dict:
+    """Checks on the published archive that the schema cannot express.
+
+    - `missing_objects`: an indexed run whose three objects are not all
+      there. Usually a job that died between writing the forecast and
+      building the map.
+    - `short_runs`: a run object holding fewer than 47 hours, which means
+      the weather archive had holes and the page will have gaps in it.
+    - `sealed` / `open`: how the archive splits, so a morning where
+      nothing sealed is visible rather than inferred.
+
+    Reports. Decides nothing. Raises nothing.
+    """
+    listing = catalogue(region, forecasts, scores, now)
+    missing, short = [], []
+
+    for entry in listing["runs"]:
+        prefix = run_prefix(pd.Timestamp(entry["run_time"]), region)
+        for name in ("forecast.json", "totals.json", "plants.json.gz"):
+            if not storage.exists(storage.child(prefix, name)):
+                missing.append(f"{entry['path']}{name}")
+
+        forecast_path = storage.child(prefix, "forecast.json")
+        if storage.exists(forecast_path):
+            stored = json.loads(storage.read_text(forecast_path))
+            if len(stored["valid_times"]) != RUN_HOURS:
+                short.append(entry["run_time"])
+
+    return {
+        "runs": len(listing["runs"]),
+        "sealed": sum(1 for entry in listing["runs"] if entry["sealed"]),
+        "open": sum(1 for entry in listing["runs"] if not entry["sealed"]),
+        "missing_objects": missing,
+        "short_runs": short,
+    }
+
+
+if __name__ == "__main__":
+    reopened = refresh()
+    static = metadata()
+    audit = verify()
+
+    print(f"published archive -> {index_path()}")
+    print(f"  {audit['runs']} runs, {audit['sealed']} sealed, {audit['open']} open")
+    print(f"  rewrote {len(reopened)} open run(s)")
+    for run_time in reopened:
+        print(f"    {run_time:%Y-%m-%d %H}z")
+    print(f"  metadata {static}")
+    if audit["missing_objects"]:
+        print(f"  MISSING  {len(audit['missing_objects'])} object(s)")
+        for name in audit["missing_objects"][:5]:
+            print(f"    {name}")
+    if audit["short_runs"]:
+        print(f"  SHORT    {len(audit['short_runs'])} run(s) under {RUN_HOURS} hours")

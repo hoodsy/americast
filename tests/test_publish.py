@@ -255,3 +255,39 @@ def test_refresh_writes_the_index(bucket, monkeypatch) -> None:
     listing = json.loads(storage.read_text(publish.index_path()))
     assert listing["region"] == "caiso"
     assert len(listing["runs"]) == 1
+
+
+# --- verify -----------------------------------------------------------
+
+
+def test_verify_reports_a_missing_object_rather_than_raising(
+    bucket, monkeypatch
+) -> None:
+    """The house rule: verify reports, and decides nothing."""
+    monkeypatch.setattr(publish, "_map_objects", lambda *a, **k: None)
+    publish.refresh(now=NOW, **stores())
+
+    audit = publish.verify(now=NOW, **stores())
+    key = publish.run_key(RUN)
+    assert audit["runs"] == 1
+    assert audit["open"] == 1
+    assert audit["missing_objects"] == [
+        f"caiso/runs/{key}/totals.json",
+        f"caiso/runs/{key}/plants.json.gz",
+    ]
+
+
+def test_verify_counts_a_whole_run(bucket, monkeypatch) -> None:
+    monkeypatch.setattr(publish, "_map_objects", lambda *a, **k: None)
+    publish.refresh(now=NOW, **stores())
+    assert publish.verify(now=NOW, **stores())["short_runs"] == []
+
+
+def test_verify_notices_a_run_with_holes_in_it(bucket, monkeypatch) -> None:
+    """A short run means the weather archive had gaps, and the page will too."""
+    monkeypatch.setattr(publish, "_map_objects", lambda *a, **k: None)
+    partial = forecasts(hours=12)
+    publish.refresh(now=NOW, forecasts=partial, scores=empty_scores())
+
+    audit = publish.verify(now=NOW, forecasts=partial, scores=empty_scores())
+    assert audit["short_runs"] == [RUN.isoformat()]
