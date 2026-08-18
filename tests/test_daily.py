@@ -14,6 +14,7 @@ from test_features_table import ALL_ZONES
 from test_model_split import table as synthetic_table
 
 from americast.daily import grade_daily, run_daily
+from americast.ingest import hrrr
 from americast.model import model as boosters
 from americast.model.split import split
 from americast.region import CAISO_CA
@@ -383,3 +384,20 @@ def test_published_objects_are_filed_under_their_region() -> None:
     """Public URLs. Moving one later breaks every client that saved it."""
     assert str(run_daily.JSON_PATH).endswith(f"{CAISO_CA.id}/forecast.json")
     assert str(grade_daily.JSON_PATH).endswith(f"{CAISO_CA.id}/scoreboard.json")
+
+
+def test_the_daily_run_stores_the_weather_it_fetched(monkeypatch, tmp_path, region) -> None:
+    """The archive has to keep growing or the next retrain has a hole in it."""
+    frame = weather(str(RUN), leads=range(1, 49), plant_ids=ALL_ZONES["plant_ids"])
+    monkeypatch.setattr("americast.daily.run_daily.hrrr.build", lambda run, plants: frame)
+    monkeypatch.setenv("AMERICAST_DATA_ROOT", str(tmp_path))
+
+    fetched = run_daily.fetch(RUN, region, root=tmp_path / "hrrr")
+    assert len(fetched) == len(frame)
+    assert hrrr.run_path(RUN, tmp_path / "hrrr").exists()
+
+
+def test_the_index_points_at_the_run_archive() -> None:
+    entry = run_daily.index()["regions"][0]
+    assert entry["runs"] == "caiso/runs.json"
+    assert entry["plants"] == "caiso/plants.json.gz"

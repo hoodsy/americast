@@ -14,8 +14,8 @@ from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.parquet as pq
 
+from americast import storage
 from americast.api.models import (
     GRADED_LEVEL,
     LevelSeries,
@@ -44,17 +44,24 @@ MW_PLACES = 1
 RATIO_PLACES = 3
 
 
-def runs(hrrr_dir: Path = HRRR_DIR) -> RunList:
+def runs(hrrr_dir: Path | str = HRRR_DIR) -> RunList:
     """Stored runs, newest first.
 
     A file whose schema does not match the current HRRR_WEATHER is left
     out rather than served. The store is refetched in place after a
     schema change, so during one a stale file would otherwise be read
     as silent nulls — the same check the golden tests use.
+
+    That check costs one read per stored run, which is nothing against a
+    disk and a round trip each against a bucket. It is kept because
+    serving silent nulls is worse than a slow index, and this route is
+    not on the path any view takes to draw a map.
     """
     found = []
-    for path in sorted(hrrr_dir.glob("hrrr_*.parquet")):
-        if pq.read_schema(path).equals(HRRR_WEATHER):
+    for path in storage.listdir(hrrr_dir, suffix=".parquet"):
+        if not Path(str(path)).name.startswith("hrrr_"):
+            continue
+        if storage.read_schema(path).equals(HRRR_WEATHER):
             found.append(_run_time(path))
     return RunList(runs=sorted(found, reverse=True))
 
@@ -66,7 +73,7 @@ def plants(region: RegionConfig = CAISO_CA) -> PlantList:
     plants that appear in a run's payload. A frontend joining the two
     on plant_id must never find one missing from the other.
     """
-    registry = fleet(pd.read_parquet(region.plant_registry_path))
+    registry = fleet(storage.read_parquet(region.plant_registry_path))
     rows = [
         Plant(
             plant_id=int(row.plant_id),
@@ -85,7 +92,7 @@ def plants(region: RegionConfig = CAISO_CA) -> PlantList:
 
 def frames(
     run_time: datetime,
-    hrrr_dir: Path = HRRR_DIR,
+    hrrr_dir: Path | str = HRRR_DIR,
     region: RegionConfig = CAISO_CA,
 ) -> PlantFrames:
     """One run's per-plant megawatts and clearness."""
@@ -110,7 +117,7 @@ def frames(
 
 def totals(
     run_time: datetime,
-    hrrr_dir: Path = HRRR_DIR,
+    hrrr_dir: Path | str = HRRR_DIR,
     region: RegionConfig = CAISO_CA,
 ) -> Totals:
     """One run's state, zone and county curves.
@@ -148,7 +155,7 @@ def _valid_times(aligned: pd.DataFrame) -> list[pd.Timestamp]:
 
 @lru_cache(maxsize=CACHED_RUNS)
 def _aligned(
-    run_time: pd.Timestamp, hrrr_dir: Path, region: RegionConfig
+    run_time: pd.Timestamp, hrrr_dir: Path | str, region: RegionConfig
 ) -> pd.DataFrame:
     """A run's per-plant estimate, aligned to hour means. Cached.
 
@@ -165,12 +172,12 @@ def _aligned(
     Raises FileNotFoundError if the run is not stored; the route turns
     that into a 404.
     """
-    path = hrrr_dir / f"hrrr_{run_time:%Y%m%d}_{run_time:%H}z.parquet"
-    if not path.exists():
+    path = storage.child(hrrr_dir, f"hrrr_{run_time:%Y%m%d}_{run_time:%H}z.parquet")
+    if not storage.exists(path):
         raise FileNotFoundError(f"no stored run at {run_time.isoformat()}")
 
-    registry = fleet(pd.read_parquet(region.plant_registry_path))
-    weather = pd.read_parquet(path)
+    registry = fleet(storage.read_parquet(region.plant_registry_path))
+    weather = storage.read_parquet(path)
     mine = weather[weather["plant_id"].isin(registry["plant_id"])]
 
     estimated = estimate(mine, registry)
@@ -184,7 +191,11 @@ def _aligned(
     return aligned.merge(places, on="plant_id", how="left")
 
 
-def _run_time(path: Path) -> pd.Timestamp:
-    """`hrrr_20240615_06z.parquet` -> 2024-06-15 06:00 UTC."""
-    day, hour = path.stem.split("_")[1:3]
+def _run_time(path: Path | str) -> pd.Timestamp:
+    """`hrrr_20240615_06z.parquet` -> 2024-06-15 06:00 UTC.
+
+    Takes the name off the end rather than the whole location, so an
+    `s3://` string reads the same as a Path.
+    """
+    day, hour = Path(str(path)).stem.split("_")[1:3]
     return pd.Timestamp(f"{day} {hour[:2]}:00", tz="UTC")

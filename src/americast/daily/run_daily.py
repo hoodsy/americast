@@ -88,11 +88,40 @@ def latest(now: pd.Timestamp | None = None) -> pd.Timestamp:
     return today - pd.Timedelta(days=1)
 
 
+def fetch(
+    run_time: pd.Timestamp,
+    region: RegionConfig = CAISO_CA,
+    root: Path | str = hrrr.HRRR_DIR,
+) -> pd.DataFrame:
+    """This run's weather at every plant, stored on the way past.
+
+    The storing is the point. Until this existed the daily loop built its
+    run in memory and dropped it, so the weather archive stopped growing
+    the day the backfill finished, and the next retrain would have had a
+    hole in it exactly where the live period is.
+
+    It is also what lets the publisher read the run back through
+    `api.frames` rather than being handed a frame, so the bucket and the
+    local API compute the map from the same file.
+
+    `root` is explicit because `HRRR_DIR` is resolved at import, so a
+    caller that moves the data root afterwards would otherwise write into
+    the real store — which a test did, once.
+    """
+    plants = fleet(storage.read_parquet(region.plant_registry_path))
+    weather = hrrr.build(run_time, plants)
+    if weather.empty:
+        raise RuntimeError(f"HRRR archive has nothing for {run_time:%Y-%m-%d %Hz}")
+    hrrr.write(weather, root)
+    return weather
+
+
 def forecast(
     run_time: pd.Timestamp,
     models: dict,
     region: RegionConfig = CAISO_CA,
     band: tuple[float, float] | None = None,
+    weather: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One run, fetched and turned into a 48-hour forecast.
 
@@ -113,8 +142,9 @@ def forecast(
     subtly different numbers — and the model would be fed something it
     was never fitted on.
     """
-    plants = fleet(pd.read_parquet(region.plant_registry_path))
-    weather = hrrr.build(run_time, plants)
+    plants = fleet(storage.read_parquet(region.plant_registry_path))
+    if weather is None:
+        weather = hrrr.build(run_time, plants)
     if weather.empty:
         raise RuntimeError(f"HRRR archive has nothing for {run_time:%Y-%m-%d %Hz}")
 
@@ -253,6 +283,8 @@ def index(regions: list[RegionConfig] | None = None, generated_at=None) -> dict:
                 **_region_block(region),
                 "forecast": f"{region.id}/forecast.json",
                 "scoreboard": f"{region.id}/scoreboard.json",
+                "runs": f"{region.id}/runs.json",
+                "plants": f"{region.id}/plants.json.gz",
             }
             for region in (regions or [CAISO_CA])
         ],
@@ -328,7 +360,13 @@ def verify(frame: pd.DataFrame) -> dict:
 
 
 if __name__ == "__main__":
+    # Imported here, and aliased. `publish` is already a function in this
+    # module, so importing the module under its own name would shadow it
+    # and `publish(load())` below would stop being callable. The import
+    # is lazy for a second reason: `publish` imports this module, so a
+    # module-level import would close the cycle.
     from americast.daily import grade_daily
+    from americast.daily import publish as archive
 
     models, meta = boosters.load()
     run_time = latest()
@@ -338,7 +376,8 @@ if __name__ == "__main__":
     band = None
     if storage.exists(grade_daily.STORE_PATH):
         band = calibrate.offsets(grade_daily.load())
-    published = forecast(run_time, models, band=band)
+    weather = fetch(run_time)
+    published = forecast(run_time, models, band=band, weather=weather)
     gained = append(published)
     publish(load())
     publish_index()
@@ -355,3 +394,14 @@ if __name__ == "__main__":
               f"({band[0]:+.3f} / {band[1]:+.3f} x clear_mw)")
     print(f"  published {JSON_PATH}")
     print(f"  index     {INDEX_PATH}")
+
+    # The archive. `metadata` belongs here rather than only in the
+    # publisher's own driver: the workflow runs this module and
+    # grade_daily and nothing else, so without it plants.json.gz is
+    # never written and the map has no plants to draw.
+    run_objects = archive.write(run_time, accuracy=recent_accuracy())
+    static = archive.metadata()
+    print(f"  archived  {archive.run_prefix(run_time)}")
+    for name, path in run_objects.items():
+        print(f"    {name:9} {path}")
+    print(f"  metadata  {static}")

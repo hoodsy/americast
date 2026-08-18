@@ -14,11 +14,11 @@ thrown away without consequence.
 
 from contextlib import asynccontextmanager
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from americast import storage
 from americast.api import frames
 from americast.api.models import PlantFrames, PlantList, RunList, Totals
 from americast.ingest.hrrr import HRRR_DIR
@@ -37,8 +37,8 @@ async def lifespan(app: FastAPI):
     rather than a bad request, and it should be visible the moment the
     process starts.
     """
-    registry = Path(CAISO_CA.plant_registry_path)
-    if not registry.exists():
+    registry = CAISO_CA.plant_registry_path
+    if not storage.exists(registry):
         raise RuntimeError(f"plant registry missing at {registry}")
     yield
 
