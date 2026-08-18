@@ -103,6 +103,21 @@ curl -s https://americast-data.s3.us-west-2.amazonaws.com/americast/public/caiso
 
 Every other object is plain JSON and reads with `curl ... | jq` directly.
 
+## Two spellings of UTC
+
+`forecast.json` writes `2025-03-01T07:00:00+00:00`; `totals.json` and
+`plants.json.gz` write `2025-03-01T07:00:00Z`. The first comes from
+pandas, the second from pydantic, and both are ISO-8601 UTC.
+
+This is left alone deliberately. Every array in this project is parallel
+and a reader indexes them together — `docs/web_handoff.md` says never to
+match on a timestamp — so the spelling is not load-bearing. Normalising
+it would mean changing either `forecast.json`, which is live and
+documented, or the payload models, which the local API also serves.
+
+`test_golden_publish.py` pins the difference so that nobody compares the
+two as strings and concludes the hours disagree.
+
 ## Running it
 
 Inside the daily job, nothing needs running by hand:

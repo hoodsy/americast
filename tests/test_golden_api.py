@@ -5,10 +5,12 @@ These prove the numbers coming out of it describe California. Skipped
 where no conforming run is stored.
 """
 
+from pathlib import Path
+
 import pandas as pd
-import pyarrow.parquet as pq
 import pytest
 
+from americast import storage
 from americast.api import frames as build
 from americast.features.power import CLEARNESS_ZENITH
 from americast.ingest.hrrr import HRRR_DIR
@@ -39,8 +41,16 @@ INSTALLED_MW = 21_520.0
 
 
 def a_stored_run() -> pd.Timestamp | None:
-    for path in sorted(HRRR_DIR.glob("hrrr_*.parquet")):
-        if pq.read_schema(path).equals(HRRR_WEATHER):
+    """The first stored run whose schema still matches.
+
+    Goes through the storage seam rather than `Path.glob`, because
+    HRRR_DIR is an `s3://` string when the data root is a bucket and a
+    string has no `.glob`.
+    """
+    for path in storage.listdir(HRRR_DIR, suffix=".parquet"):
+        if not Path(str(path)).name.startswith("hrrr_"):
+            continue
+        if storage.read_schema(path).equals(HRRR_WEATHER):
             return build._run_time(path)
     return None
 
