@@ -4,6 +4,7 @@ No network. The S3 branch is exercised only as far as path resolution,
 because everything past that is pyarrow's to get right.
 """
 
+import gzip
 from pathlib import Path
 
 import pandas as pd
@@ -106,6 +107,48 @@ def test_text_round_trips(tmp_path) -> None:
 
 
 # --- listing ----------------------------------------------------------
+
+
+def test_gzip_round_trips(tmp_path) -> None:
+    path = tmp_path / "plants.json.gz"
+    storage.write_gzip(path, '{"a": 1}')
+    assert storage.read_gzip(path) == '{"a": 1}'
+
+
+def test_a_gzip_object_is_compressed_exactly_once(tmp_path) -> None:
+    """pyarrow's `compression="detect"` would gzip a .gz path a second time."""
+    path = tmp_path / "plants.json.gz"
+    storage.write_gzip(path, '{"a": 1}')
+    assert gzip.decompress(path.read_bytes()) == b'{"a": 1}'
+
+
+def test_the_same_text_gzips_to_the_same_bytes(tmp_path) -> None:
+    """Idempotence: gzip stamps mtime into its header unless told not to.
+
+    A publisher that rewrote an unchanged object every morning would make
+    "nothing changed today" indistinguishable from "something did".
+    """
+    first, second = tmp_path / "a.json.gz", tmp_path / "b.json.gz"
+    storage.write_gzip(first, '{"a": 1}')
+    storage.write_gzip(second, '{"a": 1}')
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_a_cache_header_is_accepted_and_ignored_locally(tmp_path) -> None:
+    """Locally there is nowhere to put it, as with Content-Type today."""
+    path = tmp_path / "runs.json"
+    storage.write_text(path, "{}", cache_control="public, max-age=300")
+    assert storage.read_text(path) == "{}"
+
+
+def test_the_headers_name_the_type_and_the_policy() -> None:
+    assert storage._headers("a.json", None) == {"Content-Type": "application/json"}
+    assert storage._headers("a.json.gz", None) == {"Content-Type": "application/gzip"}
+    assert storage._headers("a.txt", None) is None
+    assert storage._headers("a.json", "public, max-age=60") == {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=60",
+    }
 
 
 def test_listdir_is_sorted_and_filtered(tmp_path) -> None:

@@ -31,6 +31,7 @@ there should not be: two stores pointing at different roots is a
 half-migrated system that looks like a working one.
 """
 
+import gzip
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -69,6 +70,20 @@ def key(relative: str) -> Path | str:
     """
     base = root().rstrip("/")
     return f"{base}/{relative}" if is_remote() else Path(base) / relative
+
+
+def child(prefix: Path | str, name: str) -> Path | str:
+    """One object directly under a prefix, in the prefix's own idiom.
+
+    `Path / name` is wrong for a remote store and string concatenation is
+    wrong for a local one, and callers that guess have to guess in every
+    branch. Path arithmetic is the specific trap: `Path("s3://b/k")`
+    silently collapses the double slash to `s3:/b/k`, which then reads as
+    a relative local path and fails naming a key that plainly exists.
+    """
+    if isinstance(prefix, Path):
+        return prefix / name
+    return f"{str(prefix).rstrip('/')}/{name}"
 
 
 def public(relative: str) -> Path | str:
@@ -130,19 +145,79 @@ def write_parquet(table: pa.Table, location: Path | str) -> None:
     os.replace(staged, path)
 
 
-def write_text(location: Path | str, text: str) -> None:
+def write_text(
+    location: Path | str, text: str, cache_control: str | None = None
+) -> None:
     """Write a text file — the JSON contracts, and nothing else so far.
 
     A `.json` object is tagged `application/json` on the way out. S3
     defaults every upload to `application/octet-stream`, which a browser
     will still parse but will not preview, and which makes the object
     look like a download rather than an API response.
+
+    `cache_control` reaches S3 as the object's own header, so a reader
+    keeps its copy for exactly as long as the object is valid. Locally
+    there is nowhere to put it and it is dropped, as Content-Type is.
     """
     filesystem, path = _resolve(location)
     _ensure_parent(filesystem, path)
-    metadata = {"Content-Type": "application/json"} if path.endswith(".json") else None
-    with filesystem.open_output_stream(path, metadata=metadata) as sink:
+    headers = _headers(path, cache_control)
+    with filesystem.open_output_stream(
+        path, compression=None, metadata=headers
+    ) as sink:
         sink.write(text.encode())
+
+
+def write_gzip(
+    location: Path | str, text: str, cache_control: str | None = None
+) -> None:
+    """Write text compressed, for the objects large enough to need it.
+
+    **There is no `Content-Encoding` header on this object.** pyarrow
+    does not pass one through to S3 at any spelling — verified against
+    the real bucket, not assumed, because arrow ignores metadata keys it
+    does not know without saying so. The object is therefore named
+    `.json.gz`, typed `application/gzip` honestly, and the browser
+    decompresses it itself through `DecompressionStream('gzip')`.
+
+    `mtime=0` matters: gzip writes the current time into its header, so
+    without it the same text would produce different bytes every morning
+    and every publish would look like a change.
+
+    `compression=None` matters too: arrow's default is `detect`, which
+    would see the `.gz` suffix and compress these bytes a second time.
+    """
+    filesystem, path = _resolve(location)
+    _ensure_parent(filesystem, path)
+    packed = gzip.compress(text.encode(), mtime=0)
+    headers = _headers(path, cache_control)
+    with filesystem.open_output_stream(
+        path, compression=None, metadata=headers
+    ) as sink:
+        sink.write(packed)
+
+
+def read_gzip(location: Path | str) -> str:
+    """Read a compressed text object back."""
+    filesystem, path = _resolve(location)
+    with filesystem.open_input_stream(path, compression=None) as source:
+        return gzip.decompress(source.readall()).decode()
+
+
+def _headers(path: str, cache_control: str | None) -> dict[str, str] | None:
+    """S3 object metadata for a write, or None where there is none.
+
+    Only keys arrow is known to forward appear here. It drops the rest
+    without complaining, which is how `Content-Encoding` was lost.
+    """
+    headers = {}
+    if path.endswith(".json"):
+        headers["Content-Type"] = "application/json"
+    elif path.endswith(".gz"):
+        headers["Content-Type"] = "application/gzip"
+    if cache_control:
+        headers["Cache-Control"] = cache_control
+    return headers or None
 
 
 def read_text(location: Path | str) -> str:
