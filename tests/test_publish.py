@@ -291,3 +291,15 @@ def test_verify_notices_a_run_with_holes_in_it(bucket, monkeypatch) -> None:
 
     audit = publish.verify(now=NOW, forecasts=partial, scores=empty_scores())
     assert audit["short_runs"] == [RUN.isoformat()]
+
+
+def test_a_run_with_no_stored_weather_still_publishes_its_curve(bucket) -> None:
+    """Every run issued before the job began storing its weather is in
+    this state. Publishing nothing for those mornings would be worse
+    than publishing half, and verify reports the gap either way."""
+    written = publish.write(RUN, hrrr_dir=bucket / "nowhere", now=NOW, **stores())
+    assert "forecast" in written
+    assert "totals" not in written
+    assert json.loads(storage.read_text(written["forecast"]))["run_time"] == (
+        RUN.isoformat()
+    )

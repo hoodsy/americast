@@ -213,21 +213,31 @@ def _map_objects(
     time would be invisible to every reader that cached the first, so the
     guard is correctness rather than a saved round trip — and it also
     keeps `refresh` from rebuilding 400 KB a morning for nothing.
+
+    **A run with no stored weather publishes its curve and no map.**
+    Every run issued before the daily job began storing its weather is
+    in that state, and so is any run whose fetch failed. Holding the
+    forecast hostage to the map would mean publishing nothing at all for
+    those mornings, which is worse than publishing half. `verify`
+    reports the gap; it is not silently fine.
     """
     totals_path = storage.child(prefix, "totals.json")
     plants_path = storage.child(prefix, "plants.json.gz")
 
-    if not storage.exists(totals_path):
-        levels = frames.totals(run_time, hrrr_dir, region)
-        storage.write_text(
-            totals_path, levels.model_dump_json(indent=2), cache_control=IMMUTABLE
-        )
+    try:
+        if not storage.exists(totals_path):
+            levels = frames.totals(run_time, hrrr_dir, region)
+            storage.write_text(
+                totals_path, levels.model_dump_json(indent=2), cache_control=IMMUTABLE
+            )
 
-    if not storage.exists(plants_path):
-        series = frames.frames(run_time, hrrr_dir, region)
-        storage.write_gzip(
-            plants_path, series.model_dump_json(), cache_control=IMMUTABLE
-        )
+        if not storage.exists(plants_path):
+            series = frames.frames(run_time, hrrr_dir, region)
+            storage.write_gzip(
+                plants_path, series.model_dump_json(), cache_control=IMMUTABLE
+            )
+    except FileNotFoundError:
+        return {}
 
     return {"totals": totals_path, "plants": plants_path}
 
