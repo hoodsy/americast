@@ -16,21 +16,24 @@ The repositories are siblings:
 
 This is the single thing that will waste your time if you miss it.
 
+**This section is now history.** As of 2026-08-18 both products are
+static objects in the same bucket, written by the same daily job, and
+`americast-web` reads both. There is no server in the read path at all.
+
+It is kept because the distinction still matters when reading the code:
+
 | | **Statewide forecast** | **The map** |
 |---|---|---|
-| What | one 48-hour curve for all of CAISO | every plant, every hour |
-| Shape | 3 static JSON files | a query API |
-| Where | **live on S3 now** | `americast/api/`, **local only** |
-| Infrastructure | none — plain HTTPS | needs a server deployed |
-| Size | ~5 KB | ~110 KB gzipped per run |
+| What | one 48-hour curve for all of CISO | every plant, every hour |
+| Shape | 3 static JSON objects | 2 objects per run, plus an index |
+| Client | `src/api/forecast.ts` | `src/api/client.ts` |
+| Graded | yes, against CAISO's published hourly output | no |
+| Size | ~5 KB | ~60 KB gzipped per run |
 
-**`americast-web` is currently built against the map API** — `src/api/client.ts`
-points at `http://localhost:8000` and fetches `/runs`, `/plants`,
-`/runs/{t}/plants`, `/runs/{t}/totals`.
-
-Nothing is wrong with that. But the statewide forecast is live today and
-needs no server, and the map needs an origin nobody has deployed yet. So
-do them in that order.
+The forecast is the graded product and decides whether the page works.
+The map is the detail underneath it, and a run issued before the daily
+job began storing its weather has none — the page then draws bare
+geography, which is honest rather than broken.
 
 ---
 
@@ -44,8 +47,35 @@ https://americast-data.s3.us-west-2.amazonaws.com/americast/public/caiso/forecas
 https://americast-data.s3.us-west-2.amazonaws.com/americast/public/caiso/scoreboard.json
 ```
 
+plus, since 2026-08-18, the map and the archive of past runs:
+
+```
+.../americast/public/caiso/runs.json                         the run index
+.../americast/public/caiso/plants.json.gz                    static plant metadata
+.../americast/public/caiso/runs/20260818T06z/forecast.json   one past run
+.../americast/public/caiso/runs/20260818T06z/totals.json     zone and county
+.../americast/public/caiso/runs/20260818T06z/plants.json.gz  per-plant
+```
+
 Refreshed once a day by a GitHub Actions cron at 09:00 UTC. No auth, no
 key, no rate limit worth thinking about. `curl` one and see.
+
+**Resolve paths from the index, never build them.** `regions.json` names
+each region's `runs.json`, and every entry in `runs.json` carries its own
+`path`. That is what lets a second region — or a second run hour a day —
+appear without a frontend deploy.
+
+**The `.gz` objects carry no `Content-Encoding`.** pyarrow cannot set
+that header, so nothing unpacks them for you:
+
+```sh
+curl -s .../caiso/plants.json.gz | gunzip | jq '.plants | length'
+```
+
+In the browser that is `res.body.pipeThrough(new DecompressionStream('gzip'))`.
+A missing object answers **403, not 404** — the bucket grants anonymous
+`GetObject` but not `ListBucket`, so S3 will not confirm a key is absent
+to someone who cannot list.
 
 ### `regions.json` — the index
 
@@ -151,9 +181,18 @@ plenty. Poll `regions.json` if you want to notice a new run.
 
 ## 4. Things that will surprise you if nobody says them
 
-**`accuracy` is `null` for the first month.** The band is calibrated
-from 30 days of graded history, and grading only started 2026-08-16.
-Render "not yet graded", not a zero. It populates itself.
+**`accuracy` can be `null`, and is thin when it is not.** It populated
+on 2026-08-17, one day after grading started, and read
+`{"window_days": 30, "mae_mw": 1156.6, "bias_mw": -817.7,
+"coverage": 0.333, "graded_hours": 9}`.
+
+Nine hours is not a track record. Read `graded_hours` before showing
+`mae_mw`, and keep rendering "not yet graded" until it is worth a
+claim — the field being present is not the same as it meaning
+something. It fills in on its own.
+
+A past run object also carries `error`, which is that run's own score
+rather than the rolling window, and `null` until the run is graded.
 
 **The band is currently under-covering, and will fix itself.** It
 promises 80% and delivers about 64% until calibration kicks in, then
@@ -181,6 +220,11 @@ an awkward offset.
 **`generated_at` vs `run_time`.** `run_time` is the weather model's
 cycle; `generated_at` is when we computed it. If `generated_at` is more
 than ~26 hours old, the cron has failed — worth surfacing.
+
+**The fleet is 833 plants and 24.2 GW AC, not 788 and 21.5.** The
+registry moved from a state filter to a balancing-authority filter,
+which brought in the Arizona and Nevada plants inside CISO's footprint.
+Anything quoting the older pair is stale, `plans/WEB.md` included.
 
 **There are six zones now, not five.** `src/api/types.ts` declares
 `Zone` as five names; Arizona's `sonoran` was added when the plant
