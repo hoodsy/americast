@@ -199,3 +199,59 @@ def test_a_gzipped_object_decompresses_to_the_same_json(tmp_path) -> None:
     path = tmp_path / "plants.json.gz"
     storage.write_gzip(path, '{"plants": []}', cache_control=publish.IMMUTABLE)
     assert json.loads(gzip.decompress(path.read_bytes())) == {"plants": []}
+
+
+# --- the index --------------------------------------------------------
+
+
+def two_runs():
+    """Yesterday's run and today's, in one frame."""
+    older = forecasts(RUN - pd.Timedelta(days=1))
+    return pd.concat([older, forecasts(RUN)], ignore_index=True)
+
+
+def test_the_index_is_newest_first() -> None:
+    listing = publish.catalogue(forecasts=two_runs(), scores=empty_scores(), now=NOW)
+    times = [entry["run_time"] for entry in listing["runs"]]
+    assert times == sorted(times, reverse=True)
+
+
+def test_every_entry_carries_its_own_path() -> None:
+    """A client must never build a key. That rule is what lets a second
+    region, or a second run hour a day, appear without a frontend deploy."""
+    listing = publish.catalogue(forecasts=forecasts(), scores=empty_scores(), now=NOW)
+    assert listing["runs"][0]["path"] == "caiso/runs/20260817T06z/"
+
+
+def test_an_ungraded_run_reports_no_error_rather_than_zero() -> None:
+    listing = publish.catalogue(forecasts=forecasts(), scores=empty_scores(), now=NOW)
+    assert listing["runs"][0]["mae_mw"] is None
+
+
+def test_a_graded_run_carries_its_error() -> None:
+    listing = publish.catalogue(forecasts=forecasts(), scores=scores(hours=3), now=NOW)
+    assert listing["runs"][0]["mae_mw"] == 50.0
+
+
+def test_the_index_carries_the_peak_so_a_picker_needs_no_run_objects() -> None:
+    listing = publish.catalogue(forecasts=forecasts(), scores=empty_scores(), now=NOW)
+    assert listing["runs"][0]["peak_mw"] == 1000.0
+
+
+def test_refresh_returns_only_the_open_runs(bucket, monkeypatch) -> None:
+    monkeypatch.setattr(publish, "_map_objects", lambda *a, **k: None)
+    assert publish.refresh(now=NOW, **stores()) == [RUN]
+
+
+def test_refresh_leaves_a_sealed_run_alone(bucket, monkeypatch) -> None:
+    monkeypatch.setattr(publish, "_map_objects", lambda *a, **k: None)
+    old = NOW + pd.Timedelta(days=publish.SEAL_AFTER_DAYS)
+    assert publish.refresh(now=old, **stores()) == []
+
+
+def test_refresh_writes_the_index(bucket, monkeypatch) -> None:
+    monkeypatch.setattr(publish, "_map_objects", lambda *a, **k: None)
+    publish.refresh(now=NOW, **stores())
+    listing = json.loads(storage.read_text(publish.index_path()))
+    assert listing["region"] == "caiso"
+    assert len(listing["runs"]) == 1

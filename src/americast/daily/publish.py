@@ -246,6 +246,97 @@ def metadata(region: RegionConfig = CAISO_CA) -> Path | str:
     return path
 
 
+def catalogue(
+    region: RegionConfig = CAISO_CA,
+    forecasts: pd.DataFrame | None = None,
+    scores: pd.DataFrame | None = None,
+    now: pd.Timestamp | None = None,
+) -> dict:
+    """The run index: every published run, newest first.
+
+    Built from the stores rather than from a listing of the bucket. The
+    store knows every run that was published; a listing knows every
+    object that happens to be there, which is a different question and
+    the wrong one.
+
+    `peak_mw` and `mae_mw` ride along so a run picker can show which days
+    were sunny and which days the model missed, without fetching 47 run
+    objects to find out.
+
+    **This object grows without bound**, by about 150 bytes a run and so
+    about 55 KB a year. That is fine for years at a five-minute TTL, and
+    it is said here rather than capped, because a silently truncated
+    archive reads exactly like a complete one.
+    """
+    issued = run_daily.load() if forecasts is None else forecasts
+    graded = _scores() if scores is None else scores
+    stamped = now or pd.Timestamp(datetime.now(tz=UTC))
+
+    peaks = issued.groupby("run_time")["p50_mw"].max()
+    lit = graded[graded["p90_mw"] > DAYLIGHT_MW]
+    errors = lit.groupby("run_time")["error_mw"].apply(lambda e: e.abs().mean())
+
+    runs = []
+    for run_time in sorted(peaks.index, reverse=True):
+        scored = graded[graded["run_time"] == run_time]
+        runs.append(
+            {
+                "run_time": run_time.isoformat(),
+                "path": f"{region.id}/runs/{run_key(run_time)}/",
+                "sealed": sealed(run_time, scored, now=stamped),
+                "peak_mw": round(float(peaks[run_time]), 1),
+                "mae_mw": (
+                    round(float(errors[run_time]), 1)
+                    if run_time in errors.index
+                    else None
+                ),
+            }
+        )
+
+    return {
+        "schema_version": run_daily.SCHEMA_VERSION,
+        "generated_at": stamped.isoformat(),
+        "region": region.id,
+        "runs": runs,
+    }
+
+
+def refresh(
+    region: RegionConfig = CAISO_CA,
+    hrrr_dir: Path | str = HRRR_DIR,
+    now: pd.Timestamp | None = None,
+    forecasts: pd.DataFrame | None = None,
+    scores: pd.DataFrame | None = None,
+) -> list[pd.Timestamp]:
+    """Rewrite every run that is still open, then the index.
+
+    Every open run, not a fixed window: `SEAL_AFTER_DAYS` is 4, so at
+    most four runs are ever open and the cost is bounded without a second
+    rule that could drift out of step with the sealing rule.
+
+    This does **not** rewrite `public/{region}/forecast.json`. That object
+    is the newest run as issued, written by `run_daily` and replaced the
+    following morning. Its actuals arrive after it has stopped being the
+    newest, so patching them in would be work nobody reads. A reader who
+    wants a graded run opens it from the index.
+    """
+    listing = catalogue(region, forecasts, scores, now)
+    open_runs = [
+        pd.Timestamp(entry["run_time"])
+        for entry in listing["runs"]
+        if not entry["sealed"]
+    ]
+
+    accuracy = run_daily.recent_accuracy()
+    for run_time in open_runs:
+        write(run_time, region, hrrr_dir, accuracy, now, forecasts, scores)
+
+    storage.write_text(
+        index_path(region), json.dumps(listing, indent=2), cache_control=BRIEF
+    )
+    return open_runs
+
+
 def _first_written(path: Path | str) -> pd.Timestamp | None:
     """When this run was computed, carried forward from an earlier write.
 
