@@ -4,9 +4,13 @@ No network. Every store is a synthetic frame, so the whole path from
 parquet to published dict is exercised without leaving the machine.
 """
 
+import gzip
+import json
+
 import pandas as pd
 import pytest
 
+from americast import storage
 from americast.daily import publish
 from americast.schemas import LIVE_SCORES
 
@@ -128,3 +132,70 @@ def test_the_header_follows_the_seal() -> None:
 
 def test_the_run_key_spells_the_weather_file() -> None:
     assert publish.run_key(RUN) == "20260817T06z"
+
+
+# --- writing objects --------------------------------------------------
+
+
+@pytest.fixture
+def bucket(tmp_path, monkeypatch):
+    """A local stand-in for the bucket, holding only what we write to it.
+
+    The live stores are handed to `write` rather than seeded here. Every
+    store path in this project is a module constant resolved at import,
+    so a test that moves the root cannot reach them by writing files.
+    """
+    monkeypatch.setenv(storage.ENV_VAR, str(tmp_path))
+    return tmp_path
+
+
+def stores() -> dict:
+    """The two live stores as `write` and `refresh` want them."""
+    return {"forecasts": forecasts(), "scores": scores(hours=3)}
+
+
+def test_the_forecast_object_lands_under_its_run(bucket, monkeypatch) -> None:
+    monkeypatch.setattr(publish, "_map_objects", lambda *a, **k: None)
+    written = publish.write(RUN, now=NOW, **stores())
+    stored = json.loads(storage.read_text(written["forecast"]))
+    assert stored["run_time"] == RUN.isoformat()
+    assert stored["sealed"] is False
+
+
+def test_a_rewrite_keeps_generated_at_and_moves_updated_at(bucket, monkeypatch) -> None:
+    monkeypatch.setattr(publish, "_map_objects", lambda *a, **k: None)
+    first = publish.write(RUN, now=NOW, **stores())
+    issued = json.loads(storage.read_text(first["forecast"]))["generated_at"]
+
+    later = NOW + pd.Timedelta(days=1)
+    publish.write(RUN, now=later, **stores())
+    stored = json.loads(storage.read_text(first["forecast"]))
+    assert stored["generated_at"] == issued
+    assert stored["updated_at"] == later.isoformat()
+
+
+def test_an_immutable_object_is_never_rebuilt(bucket, monkeypatch) -> None:
+    """Rewriting an object already sent with `immutable` is invisible to
+    every reader that cached it, so the publisher must not do it.
+
+    The map halves are also the expensive ones, so the guard saves a
+    400 KB rebuild every morning as well as the correctness problem.
+    """
+    prefix = publish.run_prefix(RUN)
+    storage.write_text(storage.child(prefix, "totals.json"), "{}")
+    storage.write_gzip(storage.child(prefix, "plants.json.gz"), "{}")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("rebuilt an object that was already immutable")
+
+    monkeypatch.setattr(publish.frames, "totals", refuse)
+    monkeypatch.setattr(publish.frames, "frames", refuse)
+
+    publish.write(RUN, now=NOW + pd.Timedelta(days=1), **stores())
+    assert storage.read_text(storage.child(prefix, "totals.json")) == "{}"
+
+
+def test_a_gzipped_object_decompresses_to_the_same_json(tmp_path) -> None:
+    path = tmp_path / "plants.json.gz"
+    storage.write_gzip(path, '{"plants": []}', cache_control=publish.IMMUTABLE)
+    assert json.loads(gzip.decompress(path.read_bytes())) == {"plants": []}

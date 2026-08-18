@@ -24,13 +24,19 @@ invisible to every reader that cached it, so the flag is a correctness
 concern rather than a performance one.
 """
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pandas as pd
 
-from americast.daily import run_daily
+from americast import storage
+from americast.api import frames
+from americast.daily import grade_daily, run_daily
 from americast.features.baselines import DAYLIGHT_MW
+from americast.ingest.hrrr import HRRR_DIR
 from americast.region import CAISO_CA, RegionConfig
+from americast.schemas import LIVE_SCORES
 
 # A published run covers 47 hours: the 48th has no successor to average
 # with and is dropped upstream.
@@ -135,3 +141,132 @@ def _error(graded: pd.DataFrame) -> dict | None:
         "coverage": round(float(lit["inside_band"].mean()), 3),
         "graded_hours": len(lit),
     }
+
+
+def run_prefix(run_time: pd.Timestamp, region: RegionConfig = CAISO_CA) -> Path | str:
+    """Where one run's objects live."""
+    return storage.public(f"{region.id}/runs/{run_key(run_time)}")
+
+
+def index_path(region: RegionConfig = CAISO_CA) -> Path | str:
+    """Where the run index lives."""
+    return storage.public(f"{region.id}/runs.json")
+
+
+def write(
+    run_time: pd.Timestamp,
+    region: RegionConfig = CAISO_CA,
+    hrrr_dir: Path | str = HRRR_DIR,
+    accuracy: dict | None = None,
+    now: pd.Timestamp | None = None,
+    forecasts: pd.DataFrame | None = None,
+    scores: pd.DataFrame | None = None,
+) -> dict[str, Path | str]:
+    """One run's three objects. Safe to re-run.
+
+    The forecast object is rewritten while actuals land. The two map
+    objects are physics over an immutable weather file, so they are
+    written once and never touched again — see `_map_objects`.
+
+    `forecasts` and `scores` default to the live stores. They are
+    arguments because every store path in this project is a module
+    constant resolved at import, so a caller that moves the data root
+    after import — a test, mostly — cannot reach the stores any other
+    way. Passing them also keeps this function a projection of whatever
+    it is handed rather than of global state.
+    """
+    prefix = run_prefix(run_time, region)
+    forecast_path = storage.child(prefix, "forecast.json")
+
+    issued = run_daily.load() if forecasts is None else forecasts
+    graded = _scores() if scores is None else scores
+    object_ = curve(
+        run_time,
+        issued,
+        graded,
+        region,
+        accuracy,
+        generated_at=_first_written(forecast_path),
+        updated_at=now,
+    )
+    storage.write_text(
+        forecast_path,
+        json.dumps(object_, indent=2),
+        cache_control=caching(object_["sealed"]),
+    )
+
+    written: dict[str, Path | str] = {"forecast": forecast_path}
+    written.update(_map_objects(run_time, prefix, region, hrrr_dir) or {})
+    return written
+
+
+def _map_objects(
+    run_time: pd.Timestamp,
+    prefix: Path | str,
+    region: RegionConfig,
+    hrrr_dir: Path | str,
+) -> dict[str, Path | str]:
+    """The per-level and per-plant objects, written at most once.
+
+    Both are `immutable` from the moment they land, because both are
+    physics over a weather file that never changes. Writing one a second
+    time would be invisible to every reader that cached the first, so the
+    guard is correctness rather than a saved round trip — and it also
+    keeps `refresh` from rebuilding 400 KB a morning for nothing.
+    """
+    totals_path = storage.child(prefix, "totals.json")
+    plants_path = storage.child(prefix, "plants.json.gz")
+
+    if not storage.exists(totals_path):
+        levels = frames.totals(run_time, hrrr_dir, region)
+        storage.write_text(
+            totals_path, levels.model_dump_json(indent=2), cache_control=IMMUTABLE
+        )
+
+    if not storage.exists(plants_path):
+        series = frames.frames(run_time, hrrr_dir, region)
+        storage.write_gzip(
+            plants_path, series.model_dump_json(), cache_control=IMMUTABLE
+        )
+
+    return {"totals": totals_path, "plants": plants_path}
+
+
+def metadata(region: RegionConfig = CAISO_CA) -> Path | str:
+    """The static plant list: names, coordinates, capacities, counties.
+
+    Changes when the registry is rebuilt, not when a run lands, so it
+    sits beside the runs rather than inside one. Compressed because it is
+    142 KB of mostly-repeated text and 25 KB once packed.
+    """
+    path = storage.public(f"{region.id}/plants.json.gz")
+    storage.write_gzip(
+        path, frames.plants(region).model_dump_json(), cache_control=DAILY
+    )
+    return path
+
+
+def _first_written(path: Path | str) -> pd.Timestamp | None:
+    """When this run was computed, carried forward from an earlier write.
+
+    `generated_at` describes the forecast, not the object, so a rewrite
+    that adds actuals must not move it — `docs/web_handoff.md` tells a
+    consumer to read it as the cron's heartbeat. None the first time,
+    which lets the caller stamp now.
+    """
+    if not storage.exists(path):
+        return None
+    stored = json.loads(storage.read_text(path))
+    return pd.Timestamp(stored["generated_at"])
+
+
+def _scores() -> pd.DataFrame:
+    """The scoreboard, or an empty frame shaped like it.
+
+    Built from the declared schema rather than a bare DataFrame, so the
+    dtypes are right on day one and a comparison against DAYLIGHT_MW does
+    not meet an object column.
+    """
+    if not storage.exists(grade_daily.STORE_PATH):
+        return LIVE_SCORES.empty_table().to_pandas()
+    return grade_daily.load()
