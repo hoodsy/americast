@@ -88,16 +88,18 @@ to someone who cannot list.
       "id": "caiso", "name": "California ISO", "kind": "iso",
       "timezone": "America/Los_Angeles", "graded": true,
       "forecast": "caiso/forecast.json",
-      "scoreboard": "caiso/scoreboard.json"
+      "scoreboard": "caiso/scoreboard.json",
+      "runs": "caiso/runs.json",
+      "plants": "caiso/plants.json.gz"
     }
   ]
 }
 ```
 
-Fetch this first and resolve the other two from it. One region today;
-the paths are relative to `.../public/`. Do not hardcode `caiso/` —
-the whole point of the index is that a second region appears here and
-the UI picks it up without a deploy.
+Fetch this first and resolve the rest from it. One region today; the
+paths are relative to `.../public/`. Do not hardcode `caiso/` — the
+whole point of the index is that a second region appears here and the UI
+picks it up without a deploy.
 
 ### `forecast.json` — the product
 
@@ -144,38 +146,52 @@ view that only shows the forecast never needs to fetch it.
 
 ---
 
-## 3. Suggested plan
+## 3. How the app is wired
 
-**Phase 1 — the statewide forecast, no backend.** Add a second client
-alongside the existing one; do not modify `src/api/client.ts`, which
-serves the map. Something like `src/api/forecast.ts`:
+Both phases are done. This is what is there now.
 
-```ts
-const PUBLIC_BASE =
-  import.meta.env.VITE_FORECAST_BASE ??
-  'https://americast-data.s3.us-west-2.amazonaws.com/americast/public';
+**`src/api/forecast.ts`** owns the statewide curve: `regions.json`, then
+the region's `forecast.json`. Plain `fetch`, plain JSON.
 
-export async function fetchRegions(): Promise<RegionsResponse> {
-  return (await fetch(`${PUBLIC_BASE}/regions.json`)).json();
-}
-export async function fetchForecast(path: string): Promise<ForecastResponse> {
-  return (await fetch(`${PUBLIC_BASE}/${path}`)).json();
+**`src/api/client.ts`** owns the map: `runs.json` for the index,
+`plants.json.gz` for the static plant list, and `{entry.path}plants.json.gz`
+for one run's per-plant values. The two `.gz` reads go through
+`DecompressionStream`; see §2.
+
+The map is fetched for **the forecast's own run**, found by matching
+`run_time` in the index. Both halves come from one job and one morning,
+so index `i` means the same hour in both and there is no offset to
+carry. If a run has no map — every run issued before 2026-08-18 — the
+fetch 403s, it is caught, and the page draws bare geography.
+
+### `runs.json` — the archive
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-18T03:38:28+00:00",
+  "region": "caiso",
+  "runs": [
+    { "run_time": "2026-08-17T06:00:00+00:00",
+      "path": "caiso/runs/20260817T06z/",
+      "sealed": false, "peak_mw": 21077.9, "mae_mw": null }
+  ]
 }
 ```
 
-Then a view: headline peak, the p50 line, the p10–p90 band, and the
-accuracy strip. That is a complete, honest product with no server.
+Newest first. `peak_mw` and `mae_mw` are there so a run picker can show
+which days were sunny and which the model missed without fetching every
+run object. `mae_mw` is `null` until the run is graded.
 
-**Phase 2 — the map.** Needs `americast/api/` (FastAPI) deployed. Read
-`docs/superpowers/specs/2026-08-12-map-api-design.md` for the contract
-and `plans/SERVE.md` for how it should be served — the short version is
-that a run is immutable, so per-run URLs get a one-year `immutable`
-cache header and a CDN, while `/runs` and `/runs/latest/*` get 60
-seconds. Do not put `immutable` on `latest`.
+`sealed` says whether the run's forecast object will ever change again.
+An open run gains actuals for a day or two; a sealed one is final and is
+served `immutable` for a year. If you cache, key on `path` and treat a
+sealed run as permanent.
 
-**Caching for phase 1:** S3 sends an `ETag`. `forecast.json` changes
-once a day, so a 5–10 minute client TTL plus a conditional refetch is
-plenty. Poll `regions.json` if you want to notice a new run.
+**Caching:** S3 sends an `ETag` and now a `Cache-Control` that already
+says the right thing, so a plain `fetch` does the correct amount of
+work. `forecast.json` and `runs.json` are five minutes; a run's map
+objects are a year. Poll `runs.json` if you want to notice a new run.
 
 ---
 
