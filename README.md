@@ -1,124 +1,103 @@
-# americast
+# Americast
 
-Statewide day-ahead solar generation forecast for the California grid (CAISO),
-built to extend to other US regions later. A tree model on weather-model
-features, graded daily against published actuals.
+Americast forecasts California's utility-scale solar generation 48 hours
+ahead, and grades every forecast against what the grid actually reported.
 
-**Scope:** utility-scale solar generation only. Rooftop (behind-the-meter)
-solar is explicitly out of scope — the target is CAISO's reported
-utility-scale solar output, hourly, in MW.
+![The Americast web app: a map of California's solar plants coloured by
+clearness, above a 48-hour statewide generation curve](docs/images/webapp.png)
+
+Utility-scale solar only. Rooftop solar is out of scope, because the target
+is CAISO's reported utility-scale number, hourly, in MW.
+
+## How it works
+
+Every plant is modelled from the weather at its own location: where the sun
+is, which way the panels point, how much light reaches the panel face, how
+hot the cells get, and what the inverter lets through. Those megawatts sum to
+a state total. The same chain runs a second time on a clear sky, and the
+ratio of the two is the clearness index. A LightGBM model then corrects the
+sum. It predicts the share of the clear-sky ceiling the fleet delivers, not
+megawatts directly, because the fleet keeps growing past its own training
+range.
+
+A GitHub Actions job runs this once a day and writes static JSON to S3. The
+web app reads those files directly, so there is no server in the read path.
+
+```sh
+curl -s https://americast-data.s3.us-west-2.amazonaws.com/americast/public/caiso/forecast.json | head
+```
 
 ## Data
 
-- `data/caiso/solar_5min.parquet` — CAISO fuel-mix solar actuals at native
-  5-minute resolution, 2023-01-01 → present. Quality notes:
-  `docs/caiso_data_quality.md`.
-- `data/registry/plants_ciso.parquet` — the CAISO utility-scale solar PV
-  fleet: 833 operating plants, 24.23 GW AC, with county and balancing
-  authority for sub-state grouping. Built from EIA-860M (monthly
-  inventory, June 2026) for who is running, and the EIA-860 annual Solar
-  schedule (2025 Early Release) for array geometry.
+| Source | What it gives |
+|---|---|
+| [NOAA HRRR](https://rapidrefresh.noaa.gov/hrrr/), read with [Herbie](https://github.com/blaylockbk/Herbie) | 3 km weather forecasts, hourly, 1 to 48 hours ahead |
+| [EIA-860 and 860M](https://www.eia.gov/electricity/data/eia860/) | the fleet: location, AC and DC capacity, tilt, azimuth, mount type |
+| CAISO fuel mix, read with [gridstatus](https://github.com/gridstatus/gridstatus) | 5-minute solar actuals — the number the forecast is graded against |
+| CAISO curtailment | the hours when output was cut on purpose |
 
-- `data/hrrr/hrrr_<YYYYMMDD>_<HH>z.parquet` — HRRR forecasts sampled at
-  every plant, one file per model run, f01–f48. Weather grids are never
-  stored. Design and restart notes: `docs/hrrr_backfill.md`.
-- `data/train/table.parquet` — the model's training table: one row per
-  (run_time, valid_time), with zone weather, the physical model's
-  megawatts, calendar columns, the CAISO label and two baselines.
-  Details: `docs/training_table.md`.
+The fleet is 833 operating plants and 24.23 GW AC. The filter is the
+balancing authority, not the state: CAISO reaches into Arizona and Nevada,
+and some Californian plants belong to other operators. Getting this wrong put
+CAISO's peak above the whole modelled fleet, which is impossible —
+[`docs/plant_registry.md`](docs/plant_registry.md).
 
-**The filter is the balancing authority, not the state.** CAISO is a
-balancing authority whose territory reaches into Arizona and Nevada, so a
-`state == CA` filter was wrong in both directions at once: it admitted 140
-Californian plants in LDWP, IID, BANC, PacifiCorp and WALC whose output
-never reaches CAISO's number, and it excluded 2,478 MW of Arizona and
-Nevada solar whose output does. The second error made the modelled
-clear-sky ceiling smaller than the fleet it was meant to bound — CAISO's
-23.21 GW peak sat above the whole modelled fleet, which is impossible and
-was the tell. At 24.23 GW the peak/installed ratio is a physically
-sensible 0.96. Details: `docs/plant_registry.md`.
+Weather grids are never stored. Each HRRR run is sampled at every plant and
+saved as one small table — [`docs/hrrr_backfill.md`](docs/hrrr_backfill.md).
 
-## The physical model
+## Results
 
-Before any learning, every plant is modelled from its own 3 km weather:
-sun position, panel orientation (fixed, single-axis with backtracking,
-dual-axis), transposition onto the panel face, cell temperature, DC
-power, then inverter losses and clipping. Those megawatts sum to county,
-zone and state. The same chain runs a second time on a clear sky, and
-the ratio of the two is the clearness index.
+Trained on 2023–2024, early-stopped on 2025 H1, graded on 2025-07 onward.
 
-On daylight hours across 2023-01 → 2024-10, the unfitted physics reaches
-**1141 MW mean absolute error** against CAISO, beating both persistence
-baselines (1262 and 1312 MW) and a naive zero (10,092 MW). That is the
-bar the model has to clear, and it is a demanding one.
+| Predictor | MAE | Skill |
+|---|---|---|
+| **Americast** | **1236 MW** | **+0.283** |
+| Physical model, unfitted | 1525 MW | +0.115 |
+| Clear-sky persistence | 1723 MW | 0.000 |
 
-Only the statewide number is graded. County and zone figures are
-physically-derived estimates that sum to it, and no hourly public truth
-exists to check them against.
+It wins every lead bucket at 4 hours and beyond.
 
-```sh
-uv run python -m americast.features.table    # rebuild the training table
-uv run python -m americast.features.report   # write data/reports/gate4.html
-```
+One weakness, measured rather than hidden: the p10–p90 band covers 58.6% of
+the hours where it claims 80%, and it sits too low rather than being too
+narrow. Plants built during the test period make real megawatts but add no
+ceiling. Why refitting that constant would be a leak —
+[`docs/model.md`](docs/model.md).
 
-## The model
-
-Three LightGBM boosters — p10, p50 and p90 — fitted on 2023-2024,
-early-stopped on 2025 H1, and graded on 2025-07 onward. They predict the
-share of the clear-sky ceiling the fleet delivers, not megawatts
-directly, because the fleet outgrew its own training range: a tenth of
-the test period sits above the highest label the model ever saw.
-
-On the test period the model reaches **1236 MW mean absolute error**
-against 1723 MW for clear-sky persistence and 1525 MW for the unfitted
-physics — 28.3% skill against the baseline the build plan names, and
-19.0% against the physics. It wins every lead bucket at 4 hours and
-beyond.
-
-Two things it does not do well, both measured rather than hidden. The
-p10–p90 band covers 58.6% of hours where it claims 80%, and it sits too
-low rather than being too narrow. The cause is that CAISO delivered
-0.967× the physics during training and 1.023× during the test period:
-the registry's newest plant is dated 2025-12, so plants commissioned
-during the test period generate real megawatts and add no ceiling. The
-model learned the first number and was graded against the second.
-Details, and why refitting that constant would be a leak:
-`docs/model.md`.
-
-```sh
-uv run python -m americast.model.model       # fit and save to data/model/
-uv run python -m americast.model.eval        # score the test period
-uv run python -m americast.model.report      # write data/reports/gate5.html
-```
+Only the state total is graded. County and zone figures are estimates that
+sum to it. No hourly public truth exists to check them against.
 
 ## The API
 
-A read-only FastAPI service over the same data, for a separate React map
-frontend. Local only for now; hosting is its own decision.
+A read-only FastAPI service over the same data. The web app does not need
+it — the browser reads static JSON from S3 — but it is the fastest way to
+explore a run locally.
 
 ```sh
-uv run python -m americast.api.app           # http://localhost:8000, docs at /docs
+uv run python -m americast.api.app    # http://localhost:8000, docs at /docs
 ```
 
-| Endpoint | Returns |
-|---|---|
-| `GET /runs` | stored model runs, newest first |
-| `GET /plants` | 788 plants: id, name, lat, lon, capacity, county, zone |
-| `GET /runs/{run_time}/plants` | per-plant `mw` and `clearness`, 47 hours |
-| `GET /runs/{run_time}/totals` | state, zone and county curves |
-| `GET /runs/latest/...` | alias for the newest run |
+`/runs` lists stored runs. `/runs/{run_time}/totals` gives the state, zone
+and county curves. `/runs/{run_time}/plants` gives per-plant megawatts and
+clearness. `/runs/latest/...` is an alias for the newest run. Every value
+array is the same length as `valid_times`, and every level carries
+`validated`, true only for the state total.
 
-Two things the contract enforces rather than documents. Every value
-array is exactly as long as `valid_times`, so a client can index them
-together. And every aggregation level carries `validated`, true only for
-the state total — county and zone are estimates that sum to the graded
-number, and no consumer can present them as forecasts by accident.
+## Related work
 
-Per-plant values are computed on demand (~1.5 s per run) and cached, so
-nothing new is stored. Design notes:
-`docs/superpowers/specs/2026-08-12-map-api-design.md`.
+- [CAISO's own day-ahead renewable forecast](https://oasis.caiso.com/mrioasis/logon.do)
+  — the operator publishes a solar forecast for the same hours (OASIS,
+  `SLD_REN_FCST`, by trading hub). The obvious next benchmark. Americast is
+  not graded against it yet.
+- [Open Source Quartz Solar Forecast](https://github.com/openclimatefix/open-source-quartz-solar-forecast)
+  — the closest open-source relative. Also boosted trees on numerical weather,
+  also 0 to 48 hours, but one site at a time and trained on UK data.
+- [Sheffield Solar PV_Live](https://www.solar.sheffield.ac.uk/pvlive/) — the
+  UK counterpart on the actuals side. It includes rooftop, which CAISO's fuel
+  mix does not.
+- [Solar Forecast Arbiter](https://forecastarbiter.epri.com/) (EPRI) — an open
+  framework for grading solar forecasts on equal terms.
 
-## Setup
+## Run it
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.13+.
 
@@ -126,3 +105,21 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.13+.
 uv sync
 uv run pytest
 ```
+
+```sh
+uv run python -m americast.features.table    # rebuild the training table
+uv run python -m americast.model.model       # fit p10, p50 and p90
+uv run python -m americast.model.eval        # score the test period
+uv run python -m americast.daily.run_daily   # one day: forecast, grade, publish
+```
+
+## Docs
+
+- [`plant_registry.md`](docs/plant_registry.md) — the fleet, and the balancing-authority trap
+- [`hrrr_backfill.md`](docs/hrrr_backfill.md) — HRRR sampling, and how to restart a backfill
+- [`training_table.md`](docs/training_table.md) — the training table, column by column
+- [`caiso_data_quality.md`](docs/caiso_data_quality.md) — what is wrong with the actuals
+- [`model.md`](docs/model.md) — features, split, scores, and the calibration problem
+- [`publish.md`](docs/publish.md) — the public objects, and their cache headers
+- [`operations.md`](docs/operations.md) — what runs where, and what it costs
+- [`web_handoff.md`](docs/web_handoff.md) — wiring a frontend to live data
